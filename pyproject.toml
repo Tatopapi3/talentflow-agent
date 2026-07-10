@@ -1,0 +1,10 @@
+[project]
+name = "talentflow-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "strands-agents",
+    "strands-agents-tools",
+    "litellm",
+    "python-dotenv",
+]
