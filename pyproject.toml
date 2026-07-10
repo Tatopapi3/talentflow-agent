@@ -7,4 +7,5 @@ dependencies = [
     "strands-agents-tools",
     "litellm",
     "python-dotenv",
+    "flask",
 ]
