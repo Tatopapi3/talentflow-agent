@@ -14,7 +14,7 @@ Recruiters spend ~23 hours per hire manually screening 50–200+ resumes, and at
 - Returns exactly one of `advance | reject | ambiguous` — flags terminology mismatches as `ambiguous` rather than guessing
 - Treats resume/JD text as untrusted data, never as instructions (resumes are attacker-controllable — see Blast Radius below)
 
-`talentflow_agent` is a `strands.Agent` wired with this tool and the same system prompt, matching the spec's required shape. In practice its own final answer can re-derive a verdict instead of relaying the tool's — see Known limitation — so `demo.py` calls `match_resume_to_jd` directly rather than going through the agent.
+`talentflow_agent` is a `strands.Agent` wired with this tool and the same system prompt, matching the spec's required shape. Its own final natural-language turn can re-derive a verdict instead of relaying the tool's, and occasionally disagrees with it — so `screen_resume(resume_text, job_description)` runs `talentflow_agent` but pulls `match_resume_to_jd`'s actual result straight out of the tool-call record in the conversation history, guaranteeing the agent relays rather than re-derives. `demo.py` uses `screen_resume`.
 
 ## Setup
 
@@ -55,9 +55,21 @@ The tool is read-only and advisory only — it never writes to an ATS or contact
 | Resume/JD text is malformed or invalid | Agent could return an invented verdict from garbage input | System prompt requires flagging unreadable input for manual review (`VERDICT: error`) |
 | Prompt injection embedded in resume text | Model manipulated into a false "advance" regardless of qualifications | System prompt explicitly instructs the model to treat resume/JD text as untrusted data, never as instructions |
 
+## Evaluation prompt design
+
+Beyond the base spec (cite evidence, never infer, treat resume/JD text as untrusted data), `_SCREENING_PROMPT` in `agent.py` adds rules discovered by testing against real resumes, not just the synthetic eval cases:
+
+- **Evidence relevance**: recruiting/managing/writing about a skill is not the same as personally exercising it (a technical recruiter who "placed 40+ backend engineers" is not thereby a backend engineer). Collaboration language doesn't by itself demonstrate autonomy. Summary/objective self-description isn't evidence.
+- **Duration thresholds**: a requirement stated as "3+ years" or "5+ years" of professional experience is not satisfied by a bootcamp, fellowship, or personal-project timeframe of a few months, even if the topic overlaps.
+- **Terminology**: a requirement is matched only by the same specific term or a true synonym — not a related-but-different concept ("backend services" is not "distributed systems").
+- **Verdict consistency**: the final VERDICT must actually follow from the MATCHED/MISSING lists — advance requires every required item matched; reject requires at least one confidently absent; ambiguous is for genuine terminology/evidence tensions.
+- **One entry per requirement**: each requirement appears in exactly one of MATCHED or MISSING, never both, never split across reworded duplicates.
+
+`test_tools.py` cases 5 and 6 are regression tests for the first two rules specifically — both were found by running a real resume through the tool and catching the model citing irrelevant evidence as a match.
+
 ## Known limitations
 
-- **Model choice**: the free OpenRouter model (`openrouter/openrouter/free`) showed real non-determinism across runs — it would occasionally flip a clear-match `advance` to `reject`, or miss the ambiguous case, and it rate-limits (429) under back-to-back calls. Switched to `openrouter/openai/gpt-4o-mini` at `temperature=0`, which resolved all of that: the golden and adversarial cases (including the prompt-injection defense) now pass deterministically across repeated runs.
-- **`talentflow_agent`'s own final answer**: even with the stronger model, the outer agent can re-derive its own verdict from the resume/JD text instead of simply relaying `match_resume_to_jd`'s result, and occasionally disagrees with it. `match_resume_to_jd` itself (used directly by `test_tools.py` and `demo.py`) is the reliably-tested path; `talentflow_agent` exists per the spec's required shape but isn't what the demo drives.
-- **Terminology-mismatch judgment calls**: the "different terminology" eval case ("led backend services" vs. "distributed systems") deterministically resolves to `advance`, not `ambiguous`, given this resume's full context (8 years, explicitly multi-region). That's a defensible read of a genuinely borderline case, not a bug — a human recruiter could reasonably call it either way. The rule still exists in the prompt for clearer mismatches; this specific test resume just isn't ambiguous enough to trigger it reliably.
+- **Model choice**: started on the free OpenRouter tier, which showed real non-determinism (flipping `advance`/`reject`/`error` across identical runs) and rate-limited (429) under back-to-back calls. Moved to `openrouter/openai/gpt-4o-mini` at `temperature=0`, which passed the synthetic eval suite reliably but still occasionally mismatched evidence on longer, multi-section real-world job descriptions (e.g. crediting a 600-hour bootcamp program as satisfying a "3+ years professional experience" requirement). Moved again to `openrouter/openai/gpt-4o`, which resolved that gap in testing against both the synthetic suite and a real resume/JD pair. `gpt-4o` costs meaningfully more per call than `gpt-4o-mini` — factor that in before high-volume use.
+- **Terminology-mismatch judgment calls**: the "different terminology" eval case ("led backend services" vs. "distributed systems") deterministically resolves to `advance`, not `ambiguous`, given this resume's full context (8 years, explicitly multi-region, plus clean evidence for every other requirement). That's a defensible read of a genuinely borderline case, not a bug — a human recruiter could reasonably call it either way.
 - **Chain-of-thought leakage**: regardless of model, the underlying completion can still narrate its reasoning before the schema block despite explicit instruction not to. `match_resume_to_jd` handles this in code by truncating its return value to start at the first `VERDICT:` occurrence, so the output contract holds even when the model doesn't fully comply.
+- **No guarantee against all evidence-matching errors**: this is LLM judgment, not a deterministic rules engine. The rules above meaningfully reduce (and in regression tests, eliminate) specific known failure modes, but a recruiter should still spot-check `reject` verdicts before acting on them, per the Blast Radius table above.

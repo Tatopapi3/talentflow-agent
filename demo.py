@@ -1,4 +1,4 @@
-from agent import match_resume_to_jd
+from agent import screen_resume
 
 
 def read_block(prompt: str) -> str:
@@ -35,7 +35,7 @@ def main():
             break
         count += 1
         print(f"\n--- Screening resume #{count} ---")
-        print(match_resume_to_jd(resume_text=resume, job_description=job_description))
+        print(screen_resume(resume_text=resume, job_description=job_description))
 
 
 if __name__ == "__main__":
