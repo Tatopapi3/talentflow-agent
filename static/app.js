@@ -1,56 +1,56 @@
 const ROBOT_STATES = {
   idle: {
-    head: "#eef3f7", body: "#dfe7ee", antenna: "#8fa6b8",
-    mouth: "M 75 118 Q 100 122 125 118",
-    speech: "Ready when you are — paste a job description and a resume below.",
+    head: "#f2e4b8", body: "#e3bf5c", antenna: "#b8860b",
+    mouth: "M 95 118 Q 120 122 145 118",
+    speech: "Hi, I'm your TalentFlow AI agent — paste a job description and a resume below and I'll screen it.",
   },
   thinking: {
-    head: "#fff6e0", body: "#ffedc2", antenna: "#f4b942",
-    mouth: "M 80 120 Q 100 116 120 120",
+    head: "#f7ecc9", body: "#f0d27a", antenna: "#c9980f",
+    mouth: "M 100 120 Q 120 116 140 120",
     speech: "Reading the resume against the job description…",
   },
   advance: {
-    head: "#e7f9ee", body: "#cdf1da", antenna: "#3fbf6f",
-    mouth: "M 72 110 Q 100 140 128 110",
+    head: "#e4efe1", body: "#bfdcc4", antenna: "#3f6b4e",
+    mouth: "M 92 110 Q 120 140 148 110",
     speech: "Good match — I'd advance this one.",
   },
   reject: {
-    head: "#fdeceb", body: "#f8d3d0", antenna: "#e5605a",
-    mouth: "M 75 128 Q 100 106 125 128",
+    head: "#f7e6df", body: "#eec3b0", antenna: "#a8412f",
+    mouth: "M 95 128 Q 120 106 145 128",
     speech: "This one is missing key requirements.",
   },
   ambiguous: {
-    head: "#fff8e1", body: "#ffedb0", antenna: "#e0a72e",
-    mouth: "M 80 120 L 92 120 M 108 120 L 120 120",
+    head: "#faf1d6", body: "#f0d27a", antenna: "#b8860b",
+    mouth: "M 100 120 L 112 120 M 128 120 L 140 120",
     speech: "Mixed signals here — worth a closer look.",
   },
   error: {
-    head: "#f1f1f1", body: "#dcdcdc", antenna: "#9a9a9a",
-    mouth: "M 80 122 L 120 122",
+    head: "#efe9dd", body: "#d9cdb8", antenna: "#7a6a55",
+    mouth: "M 100 122 L 140 122",
     speech: "I couldn't screen that — check the input and try again.",
   },
 };
 
 const EYE_BUILDERS = {
   dot: () => `
-    <circle class="eye" cx="72" cy="85" r="11"/>
-    <circle class="eye" cx="128" cy="85" r="11"/>
+    <circle class="eye" cx="92" cy="85" r="11"/>
+    <circle class="eye" cx="148" cy="85" r="11"/>
   `,
   happy: () => `
-    <path class="eye-line" d="M 60 88 Q 72 72 84 88" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
-    <path class="eye-line" d="M 116 88 Q 128 72 140 88" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
+    <path class="eye-line" d="M 80 88 Q 92 72 104 88" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
+    <path class="eye-line" d="M 136 88 Q 148 72 160 88" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
   `,
   sad: () => `
-    <path class="eye-line" d="M 60 90 Q 72 100 84 90" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
-    <path class="eye-line" d="M 116 90 Q 128 100 140 90" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
+    <path class="eye-line" d="M 80 90 Q 92 100 104 90" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
+    <path class="eye-line" d="M 136 90 Q 148 100 160 90" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
   `,
   confused: () => `
-    <circle class="eye" cx="72" cy="85" r="11"/>
-    <path class="eye-line" d="M 116 90 Q 128 78 140 90" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
+    <circle class="eye" cx="92" cy="85" r="11"/>
+    <path class="eye-line" d="M 136 90 Q 148 78 160 90" fill="none" stroke="#3a4a58" stroke-width="6" stroke-linecap="round"/>
   `,
   x: () => `
-    <path class="eye-line" d="M 63 76 L 81 94 M 81 76 L 63 94" stroke="#3a4a58" stroke-width="5" stroke-linecap="round"/>
-    <path class="eye-line" d="M 119 76 L 137 94 M 137 76 L 119 94" stroke="#3a4a58" stroke-width="5" stroke-linecap="round"/>
+    <path class="eye-line" d="M 83 76 L 101 94 M 101 76 L 83 94" stroke="#3a4a58" stroke-width="5" stroke-linecap="round"/>
+    <path class="eye-line" d="M 139 76 L 157 94 M 157 76 L 139 94" stroke="#3a4a58" stroke-width="5" stroke-linecap="round"/>
   `,
 };
 
@@ -70,6 +70,9 @@ function setRobotState(stateName, speechOverride) {
 
   document.getElementById("head").style.fill = state.head;
   document.getElementById("body").style.fill = state.body;
+  ["arm-l", "arm-r", "hand-l", "hand-r", "shoulder-l", "shoulder-r"].forEach((id) => {
+    document.getElementById(id).style.fill = state.body;
+  });
   document.getElementById("antenna-tip").style.fill = state.antenna;
   document.getElementById("mouth").setAttribute("d", state.mouth);
 

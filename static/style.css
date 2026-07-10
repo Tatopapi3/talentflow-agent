@@ -72,10 +72,25 @@ header h1 {
 }
 
 #head, #body {
-  fill: #f1e6c8;
-  stroke: #d8c391;
+  fill: #e3bf5c;
+  stroke: #b8860b;
   stroke-width: 2;
   transition: fill 0.4s ease;
+}
+
+#head {
+  fill: #f2e4b8;
+}
+
+#arm-l, #arm-r, #hand-l, #hand-r, #shoulder-l, #shoulder-r {
+  fill: #e3bf5c;
+  stroke: #96700a;
+  stroke-width: 2.5;
+  transition: fill 0.4s ease;
+}
+
+#hand-l, #hand-r {
+  stroke-width: 3;
 }
 
 #antenna-tip {
