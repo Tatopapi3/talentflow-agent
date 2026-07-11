@@ -97,33 +97,69 @@ function renderResultCard(result) {
   }
 
   const GENERIC_MISSING = "no evidence found in resume";
-  const listItems = (items) =>
+
+  const requirementItems = (items, annotationKey, emptyNote) =>
     items.length
       ? items.map((item) => {
           const showDetail = item.detail && item.detail.toLowerCase() !== GENERIC_MISSING;
+          const priorityTag = item.priority === "nice-to-have" ? "nice-to-have" : "required";
+          const annotation = item[annotationKey];
           return `
           <li>
             <span class="req-name">${escapeHtml(item.requirement)}</span>
+            <span class="priority-tag priority-${priorityTag}">${priorityTag}</span>
             ${showDetail ? `<span class="req-detail">${escapeHtml(item.detail)}</span>` : ""}
+            ${annotation ? `<span class="req-annotation">${escapeHtml(annotation)}</span>` : ""}
           </li>
         `;
         }).join("")
-      : '<li><span class="req-detail">None</span></li>';
+      : `<li class="empty-note">${emptyNote}</li>`;
+
+  const highlightItems = (items) =>
+    items.length
+      ? items.map((item) => `
+          <li>
+            <span class="req-name">${escapeHtml(item.detail)}</span>
+            ${item.current_mention ? `<span class="req-detail">"${escapeHtml(item.current_mention)}"</span>` : ""}
+            ${item.suggestion ? `<span class="req-annotation">${escapeHtml(item.suggestion)}</span>` : ""}
+          </li>
+        `).join("")
+      : '<li class="empty-note">Nothing to highlight — the resume already presents this clearly.</li>';
+
+  const score = typeof result.score === "number" ? result.score : null;
+  const scoreClass = score === null ? "" : score >= 75 ? "score-high" : score >= 50 ? "score-mid" : "score-low";
 
   card.innerHTML = `
     <div class="verdict-row">
       <span class="verdict-badge ${result.verdict}">${result.verdict}</span>
+      ${score !== null ? `<span class="score-badge ${scoreClass}">${score}<span class="score-max">/100</span></span>` : ""}
       <span class="confidence">Confidence: ${escapeHtml(result.confidence || "")}</span>
     </div>
-    <div class="req-section">
-      <h4>Matched requirements</h4>
-      <ul class="req-list">${listItems(result.matched || [])}</ul>
+    <div class="tab-buttons">
+      <button type="button" class="tab-btn active" data-tab="aligned">✅ Aligned Skills</button>
+      <button type="button" class="tab-btn" data-tab="highlight">💡 Highlight More</button>
+      <button type="button" class="tab-btn" data-tab="gaps">⚠️ Gaps</button>
     </div>
-    <div class="req-section">
-      <h4>Missing requirements</h4>
-      <ul class="req-list">${listItems(result.missing || [])}</ul>
+    <div class="tab-panel" data-panel="aligned">
+      <ul class="req-list">${requirementItems(result.matched || [], "relevance", "No aligned skills found.")}</ul>
+    </div>
+    <div class="tab-panel" data-panel="highlight" hidden>
+      <ul class="req-list">${highlightItems(result.highlights || [])}</ul>
+    </div>
+    <div class="tab-panel" data-panel="gaps" hidden>
+      <ul class="req-list">${requirementItems(result.missing || [], "importance", "No gaps found.")}</ul>
     </div>
   `;
+
+  card.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      card.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      card.querySelectorAll(".tab-panel").forEach((p) => { p.hidden = true; });
+      btn.classList.add("active");
+      card.querySelector(`.tab-panel[data-panel="${btn.dataset.tab}"]`).hidden = false;
+    });
+  });
+
   return card;
 }
 

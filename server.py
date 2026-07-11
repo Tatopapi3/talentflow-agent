@@ -1,9 +1,8 @@
 import io
-import re
 
 from flask import Flask, jsonify, render_template, request
 
-from agent import screen_resume
+from agent import parse_result, screen_resume
 
 app = Flask(__name__)
 
@@ -33,57 +32,6 @@ def extract_text_from_file(file_storage) -> tuple[str, str | None]:
     if not text.strip():
         return "", "Couldn't extract any text from that file."
     return text, None
-
-SECTION_HEADERS = ("MATCHED REQUIREMENTS:", "MISSING REQUIREMENTS:")
-
-
-def extract_section(output: str, header: str) -> str:
-    """Return the text under a schema section header, up to whichever
-    known header comes next (or end of string)."""
-    if header not in output:
-        return ""
-    start = output.index(header) + len(header)
-    end = len(output)
-    for other in SECTION_HEADERS:
-        if other == header:
-            continue
-        idx = output.find(other, start)
-        if idx != -1:
-            end = min(end, idx)
-    return output[start:end]
-
-
-def parse_requirement_lines(section_text: str) -> list[dict]:
-    items = []
-    for line in section_text.splitlines():
-        line = line.strip().lstrip("-").strip()
-        if not line:
-            continue
-        name, _, detail = line.partition(":")
-        items.append({"requirement": name.strip(), "detail": detail.strip().strip('"')})
-    return items
-
-
-def parse_result(raw: str) -> dict:
-    verdict_match = re.match(r"VERDICT:\s*(\w+)", raw)
-    verdict = verdict_match.group(1) if verdict_match else "error"
-
-    if verdict == "error":
-        reason_match = re.search(r"REASON:\s*(.+)", raw)
-        return {
-            "verdict": "error",
-            "reason": reason_match.group(1).strip() if reason_match else "Unknown error",
-            "raw": raw,
-        }
-
-    confidence_match = re.search(r"CONFIDENCE:\s*(\w+)", raw)
-    return {
-        "verdict": verdict,
-        "confidence": confidence_match.group(1) if confidence_match else "low",
-        "matched": parse_requirement_lines(extract_section(raw, "MATCHED REQUIREMENTS:")),
-        "missing": parse_requirement_lines(extract_section(raw, "MISSING REQUIREMENTS:")),
-        "raw": raw,
-    }
 
 
 @app.route("/")

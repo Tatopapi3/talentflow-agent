@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 
 from strands import Agent, tool
@@ -60,7 +61,19 @@ Your VERDICT must be logically consistent with your own MATCHED and MISSING list
 If you find yourself about to list something under MATCHED that fails the EVIDENCE RELEVANCE check, move it to MISSING instead and adjust the verdict accordingly — never leave a mismatch between what you listed and what you conclude.
 
 ONE ENTRY PER REQUIREMENT
-First, extract the job description's distinct requirements as a fixed list (merge any requirement that is restated in multiple places, e.g. under both a responsibilities section and a qualifications section, into a single entry — do not list the same underlying requirement twice under different wording). Then classify each one exactly once as matched or missing; the same requirement must never appear in both lists. Under MISSING REQUIREMENTS, the text after the colon must be exactly "no evidence found in resume" — never quote the job description's own requirement text there, and never explain further. The only exception is the ambiguous case described under TERMINOLOGY, where you instead name the specific tension.
+First, extract the job description's distinct requirements as a fixed list (merge any requirement that is restated in multiple places, e.g. under both a responsibilities section and a qualifications section, into a single entry — do not list the same underlying requirement twice under different wording). Then classify each one exactly once as matched or missing; the same requirement must never appear in both lists. Under MISSING REQUIREMENTS, the text after the colon must be exactly "no evidence found in resume", optionally followed by " — importance: " and one brief clause on why this specific gap matters for the role — never quote the job description's own requirement text there. The only exception is the ambiguous case described under TERMINOLOGY, where you instead name the specific tension (no importance suffix in that case).
+
+PRIORITY TAGGING
+Every requirement you list — matched or missing — must be tagged with exactly one priority, as the job description itself presents it: (required) for anything under a "Required," "Must have," or similarly-framed core section, or for any requirement in a job description that does not separate required from optional at all. Use (nice-to-have) only for requirements the job description explicitly frames as optional, preferred, or bonus (e.g. "Nice to have," "Preferred," "Bonus points for"). This tag is used downstream to compute a match score, so it must reflect the job description's own framing, not your judgment of how important the skill actually is.
+
+RELEVANCE
+For every entry under MATCHED REQUIREMENTS, follow the quoted evidence with " — relevance: " and one brief clause explaining why that evidence matters for this specific role (not a generic statement about the skill in general).
+
+HIGHLIGHTS
+After classifying matched and missing requirements, separately identify up to 3 additional details already present in the resume that are relevant to this job but under-emphasized, vague, or easy for a recruiter to skim past. For each, quote the resume's current phrasing and suggest one concrete, specific way to reframe or expand it to better demonstrate fit for this role. Never invent achievements, numbers, or scope not already in the resume — only suggest better framing of what is genuinely there. If nothing meaningfully under-emphasized exists, leave this section with just the header and no items.
+
+EMPTY SECTIONS
+If every requirement is matched, write the MISSING REQUIREMENTS header with nothing after it — no placeholder line, and never write "none," "n/a," "-," or any other filler as if it were a requirement. The same applies to MATCHED REQUIREMENTS in the rare case nothing at all is matched, and to HIGHLIGHT MORE when there is nothing worth surfacing. A section with no items is simply the header followed by the next section (or the end of the schema).
 
 OUTPUT SCHEMA
 Respond with ONLY the schema block below. Your response must start with "VERDICT:" as the very first characters — no reasoning, analysis, or preamble before it, and no commentary after it. Replace requirement-name and evidence-phrase with actual text; do not include literal square brackets or angle brackets in your output.
@@ -68,9 +81,11 @@ Respond with ONLY the schema block below. Your response must start with "VERDICT
 VERDICT: advance | reject | ambiguous
 CONFIDENCE: high | low
 MATCHED REQUIREMENTS:
-- requirement-name: "exact resume phrase or line as evidence"
+- requirement-name (required | nice-to-have): "exact resume phrase or line as evidence" — relevance: why this matters for this role
 MISSING REQUIREMENTS:
-- requirement-name: no evidence found in resume
+- requirement-name (required | nice-to-have): no evidence found in resume — importance: why this gap matters for this role
+HIGHLIGHT MORE:
+- resume-detail-name: "current resume phrasing" — suggestion: concrete way to reframe or expand it
 
 If the resume or job description text is empty, unreadable, or clearly not a resume/JD, output only:
 
@@ -142,3 +157,129 @@ def screen_resume(resume_text: str, job_description: str) -> str:
                 return "".join(c.get("text", "") for c in tool_result["content"])
 
     raise RuntimeError("talentflow_agent did not call match_resume_to_jd")
+
+
+SECTION_HEADERS = ("MATCHED REQUIREMENTS:", "MISSING REQUIREMENTS:", "HIGHLIGHT MORE:")
+_PRIORITY_PATTERN = re.compile(r"^(.*?)\s*\((required|nice-to-have)\)\s*$", re.IGNORECASE)
+
+
+def extract_section(output: str, header: str) -> str:
+    """Return the text under a schema section header, up to whichever
+    known header comes next (or end of string)."""
+    if header not in output:
+        return ""
+    start = output.index(header) + len(header)
+    end = len(output)
+    for other in SECTION_HEADERS:
+        if other == header:
+            continue
+        idx = output.find(other, start)
+        if idx != -1:
+            end = min(end, idx)
+    return output[start:end]
+
+
+_PLACEHOLDER_LINES = {"none", "n/a", "na", "-", "no missing requirements", "no matched requirements"}
+
+
+def _split_annotation(text: str, keyword: str) -> tuple[str, str]:
+    """Split a detail string on ' — {keyword}: ' if present, returning
+    (main_text, annotation) with the second element empty if absent."""
+    marker = f" — {keyword}: "
+    if marker in text:
+        main, _, annotation = text.partition(marker)
+        return main.strip(), annotation.strip()
+    return text.strip(), ""
+
+
+def parse_requirement_lines(section_text: str, annotation_keyword: str) -> list[dict]:
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip().lstrip("-").strip()
+        if not line or line.strip(".").lower() in _PLACEHOLDER_LINES:
+            continue
+        name, _, detail_full = line.partition(":")
+        name = name.strip()
+        priority = "required"  # conservative default if the model omits the tag
+        tag_match = _PRIORITY_PATTERN.match(name)
+        if tag_match:
+            name = tag_match.group(1).strip()
+            priority = tag_match.group(2).lower()
+        detail, annotation = _split_annotation(detail_full.strip(), annotation_keyword)
+        items.append({
+            "requirement": name,
+            "detail": detail.strip('"'),
+            "priority": priority,
+            annotation_keyword: annotation,
+        })
+    return items
+
+
+def parse_highlight_lines(section_text: str) -> list[dict]:
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip().lstrip("-").strip()
+        if not line or line.strip(".").lower() in _PLACEHOLDER_LINES:
+            continue
+        name, _, detail_full = line.partition(":")
+        current_mention, suggestion = _split_annotation(detail_full.strip(), "suggestion")
+        items.append({
+            "detail": name.strip(),
+            "current_mention": current_mention.strip('"'),
+            "suggestion": suggestion,
+        })
+    return items
+
+
+def compute_match_score(matched: list[dict], missing: list[dict]) -> int:
+    """Weighted percentage of requirements satisfied, 1-100. Required items
+    count 3x a nice-to-have, since missing a hard requirement matters far
+    more than missing a nice-to-have. Computed deterministically from the
+    same matched/missing lists match_resume_to_jd already produces, rather
+    than asking the model to invent a number directly — an LLM-generated
+    score would be exactly as run-to-run inconsistent as verdicts have shown
+    themselves to be elsewhere in this project."""
+    REQUIRED_WEIGHT = 3
+    NICE_TO_HAVE_WEIGHT = 1
+
+    def weight(item: dict) -> int:
+        return REQUIRED_WEIGHT if item.get("priority") == "required" else NICE_TO_HAVE_WEIGHT
+
+    matched_weight = sum(weight(i) for i in matched)
+    missing_weight = sum(weight(i) for i in missing)
+    total_weight = matched_weight + missing_weight
+
+    if total_weight == 0:
+        return 100
+
+    score = round((matched_weight / total_weight) * 100)
+    return max(1, min(100, score))
+
+
+def parse_result(raw: str) -> dict:
+    """Parse match_resume_to_jd's raw schema text into a structured dict,
+    including a deterministic 1-100 match score."""
+    verdict_match = re.match(r"VERDICT:\s*(\w+)", raw)
+    verdict = verdict_match.group(1) if verdict_match else "error"
+
+    if verdict == "error":
+        reason_match = re.search(r"REASON:\s*(.+)", raw)
+        return {
+            "verdict": "error",
+            "reason": reason_match.group(1).strip() if reason_match else "Unknown error",
+            "raw": raw,
+        }
+
+    confidence_match = re.search(r"CONFIDENCE:\s*(\w+)", raw)
+    matched = parse_requirement_lines(extract_section(raw, "MATCHED REQUIREMENTS:"), "relevance")
+    missing = parse_requirement_lines(extract_section(raw, "MISSING REQUIREMENTS:"), "importance")
+    highlights = parse_highlight_lines(extract_section(raw, "HIGHLIGHT MORE:"))
+    return {
+        "verdict": verdict,
+        "confidence": confidence_match.group(1) if confidence_match else "low",
+        "score": compute_match_score(matched, missing),
+        "matched": matched,
+        "missing": missing,
+        "highlights": highlights,
+        "raw": raw,
+    }

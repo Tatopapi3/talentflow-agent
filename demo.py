@@ -1,4 +1,4 @@
-from agent import screen_resume
+from agent import parse_result, screen_resume
 
 
 def read_block(prompt: str) -> str:
@@ -35,7 +35,11 @@ def main():
             break
         count += 1
         print(f"\n--- Screening resume #{count} ---")
-        print(screen_resume(resume_text=resume, job_description=job_description))
+        raw = screen_resume(resume_text=resume, job_description=job_description)
+        result = parse_result(raw)
+        if "score" in result:
+            print(f"SCORE: {result['score']}/100")
+        print(raw)
 
 
 if __name__ == "__main__":

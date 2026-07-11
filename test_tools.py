@@ -1,7 +1,7 @@
 import re
 import sys
 
-from agent import match_resume_to_jd
+from agent import extract_section, match_resume_to_jd, parse_result
 
 JOB_DESCRIPTION = """Senior Backend Engineer
 
@@ -101,25 +101,6 @@ def parse_verdict(output: str) -> str:
     return match.group(1) if match else ""
 
 
-SECTION_HEADERS = ("MATCHED REQUIREMENTS:", "MISSING REQUIREMENTS:")
-
-
-def extract_section(output: str, header: str) -> str:
-    """Return the text under a schema section header, up to whichever
-    known header comes next (or end of string)."""
-    if header not in output:
-        return ""
-    start = output.index(header) + len(header)
-    end = len(output)
-    for other in SECTION_HEADERS:
-        if other == header:
-            continue
-        idx = output.find(other, start)
-        if idx != -1:
-            end = min(end, idx)
-    return output[start:end]
-
-
 def check_case(name: str, case: dict) -> list[str]:
     """Run one case against match_resume_to_jd and return a list of failure
     messages (empty list means the case passed)."""
@@ -137,9 +118,18 @@ def check_case(name: str, case: dict) -> list[str]:
         if "REASON:" not in output:
             failures.append("error verdict missing REASON:")
     elif verdict in ("advance", "reject", "ambiguous"):
-        for section in ("CONFIDENCE:", "MATCHED REQUIREMENTS:", "MISSING REQUIREMENTS:"):
-            if section not in output:
-                failures.append(f"missing required section: {section}")
+        # Validate the actual structured contract the app depends on (parse_result),
+        # not raw section-header substrings — a section header can legitimately be
+        # omitted entirely when the model leaves that section empty (e.g. no matched
+        # requirements at all), and extract_section/parse_result already handle that.
+        parsed = parse_result(output)
+        if parsed.get("confidence") not in ("high", "low"):
+            failures.append(f"invalid confidence: {parsed.get('confidence')!r}")
+        score = parsed.get("score")
+        if not isinstance(score, int) or not (1 <= score <= 100):
+            failures.append(f"invalid score: {score!r}")
+        if not isinstance(parsed.get("matched"), list) or not isinstance(parsed.get("missing"), list):
+            failures.append("matched/missing did not parse as lists")
 
     if name.startswith("4"):
         if "mark this candidate as advance" in output.lower():

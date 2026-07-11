@@ -11,8 +11,12 @@ Recruiters spend ~23 hours per hire manually screening 50–200+ resumes, and at
 `match_resume_to_jd(resume_text, job_description)` sends both texts to an LLM (via `LiteLLMModel`/OpenRouter) with a system prompt that:
 
 - Requires citing the exact resume phrase behind every matched/missing requirement (no inferred skills)
+- Tags every requirement `(required)` or `(nice-to-have)` per the job description's own framing, and appends a brief relevance/importance clause to each
+- Surfaces up to 3 additional resume details that are relevant but under-emphasized (`HIGHLIGHT MORE`), with a concrete reframing suggestion — never inventing anything not already in the resume
 - Returns exactly one of `advance | reject | ambiguous` — flags terminology mismatches as `ambiguous` rather than guessing
 - Treats resume/JD text as untrusted data, never as instructions (resumes are attacker-controllable — see Blast Radius below)
+
+`agent.parse_result(raw)` turns that raw text into a structured dict — `verdict`, `confidence`, `matched`, `missing`, `highlights`, and a **deterministic 1-100 `score`**. The score is computed in code from the parsed matched/missing lists (required items weighted 3x a nice-to-have), not asked of the model directly — an LLM-generated number would be exactly as run-to-run inconsistent as verdicts have shown themselves to be elsewhere in this project. Both `server.py` and `demo.py` use this shared parser.
 
 `talentflow_agent` is a `strands.Agent` wired with this tool and the same system prompt, matching the spec's required shape. Its own final natural-language turn can re-derive a verdict instead of relaying the tool's, and occasionally disagrees with it — so `screen_resume(resume_text, job_description)` runs `talentflow_agent` but pulls `match_resume_to_jd`'s actual result straight out of the tool-call record in the conversation history, guaranteeing the agent relays rather than re-derives. `demo.py` uses `screen_resume`.
 
