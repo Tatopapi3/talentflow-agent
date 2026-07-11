@@ -44,6 +44,14 @@ Run the interactive demo — paste one job description, then paste resumes one a
 python demo.py
 ```
 
+Run the web UI (paste a JD, then either upload a resume as PDF/DOCX/TXT or paste the text) — see the robot mascot react to each verdict:
+
+```bash
+python server.py
+```
+
+Then open **http://localhost:8000**.
+
 ## Blast radius
 
 The tool is read-only and advisory only — it never writes to an ATS or contacts a candidate. Worst case: it misreads a resume and contributes to a wrong "reject" recommendation, but a recruiter reviews the cited evidence before any real action is taken.

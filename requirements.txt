@@ -3,3 +3,5 @@ strands-agents-tools
 litellm
 python-dotenv
 flask
+pypdf
+python-docx
