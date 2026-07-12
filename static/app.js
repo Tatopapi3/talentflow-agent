@@ -149,6 +149,12 @@ function renderResultCard(result) {
     <div class="tab-panel" data-panel="gaps" hidden>
       <ul class="req-list">${requirementItems(result.missing || [], "importance", "No gaps found.")}</ul>
     </div>
+    <div class="feedback-row">
+      <span class="feedback-label">Your actual call on this candidate:</span>
+      <button type="button" class="feedback-btn feedback-advance" data-decision="advance">👍 I'd advance them</button>
+      <button type="button" class="feedback-btn feedback-reject" data-decision="reject">👎 Not a fit</button>
+      <span class="feedback-note"></span>
+    </div>
   `;
 
   card.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -157,6 +163,31 @@ function renderResultCard(result) {
       card.querySelectorAll(".tab-panel").forEach((p) => { p.hidden = true; });
       btn.classList.add("active");
       card.querySelector(`.tab-panel[data-panel="${btn.dataset.tab}"]`).hidden = false;
+    });
+  });
+
+  const feedbackNote = card.querySelector(".feedback-note");
+  card.querySelectorAll(".feedback-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      card.querySelectorAll(".feedback-btn").forEach((b) => { b.disabled = true; });
+      try {
+        const response = await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            job_description: result.job_description,
+            resume_text: result.resume_text,
+            decision: btn.dataset.decision,
+          }),
+        });
+        const body = await response.json();
+        feedbackNote.textContent = body.status === "ok"
+          ? "Saved — I'll factor this in for future candidates against this same job description."
+          : "Couldn't save that — try again.";
+      } catch (err) {
+        feedbackNote.textContent = "Couldn't save that — try again.";
+        card.querySelectorAll(".feedback-btn").forEach((b) => { b.disabled = false; });
+      }
     });
   });
 

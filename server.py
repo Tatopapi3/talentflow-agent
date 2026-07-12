@@ -2,6 +2,7 @@ import io
 
 from flask import Flask, jsonify, render_template, request
 
+import feedback_store
 from agent import parse_result, screen_resume
 
 app = Flask(__name__)
@@ -55,7 +56,29 @@ def screen():
         return jsonify({"verdict": "error", "reason": "Job description and resume are both required."})
 
     raw = screen_resume(resume_text=resume_text, job_description=job_description)
-    return jsonify(parse_result(raw))
+    result = parse_result(raw)
+    # Echo back what was actually screened (not just what was submitted) so the
+    # frontend can attach correct feedback even when the resume came from an
+    # uploaded file rather than pasted text.
+    result["resume_text"] = resume_text
+    result["job_description"] = job_description
+    return jsonify(result)
+
+
+@app.route("/api/feedback", methods=["POST"])
+def feedback():
+    data = request.get_json(force=True) or {}
+    job_description = (data.get("job_description") or "").strip()
+    resume_text = (data.get("resume_text") or "").strip()
+    decision = data.get("decision")
+
+    if decision not in ("advance", "reject"):
+        return jsonify({"status": "error", "reason": "decision must be 'advance' or 'reject'"}), 400
+    if not job_description or not resume_text:
+        return jsonify({"status": "error", "reason": "job_description and resume_text are both required"}), 400
+
+    feedback_store.save_feedback(job_description, resume_text, decision)
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from strands import Agent, tool
 from strands.models.litellm import LiteLLMModel
 
+import feedback_store
+
 load_dotenv()
 
 TALENTFLOW_SYSTEM_PROMPT = """You are TalentFlow, a resume screening assistant for a recruiter.
@@ -116,13 +118,55 @@ def strip_to_verdict(text: str) -> str:
     return text[verdict_idx:] if verdict_idx != -1 else text
 
 
+_CALIBRATION_EXCERPT_CHARS = 800
+
+
+def _build_calibration_block(job_description: str) -> str:
+    """Build a prompt block surfacing this recruiter's own past decisions
+    on other candidates for this exact job description, if any exist.
+
+    Deliberately conservative: examples are used only to break ties on
+    genuinely borderline cases, never to override clear evidence on
+    required qualifications, and the model is explicitly told to ignore
+    any past decision that looks like it reflects a protected
+    characteristic rather than a job-relevant qualification — training an
+    agent to mimic a recruiter's raw historical pattern risks silently
+    learning and amplifying whatever bias is already in that history
+    (the same failure mode that killed Amazon's internal resume-screening
+    tool). This stays a small set of visible, literal past decisions —
+    not a learned or summarized "preference profile" — so a human can
+    always see exactly what the model was shown."""
+    examples = feedback_store.get_calibration_examples(job_description)
+    if not examples:
+        return ""
+
+    lines = [
+        "RECRUITER CALIBRATION EXAMPLES",
+        "This recruiter has already made real decisions on other candidates for this exact job description. "
+        "Use them only to help resolve a genuinely borderline call on THIS candidate — never to override clear "
+        "evidence about required qualifications. If a past decision appears to reflect a candidate's age, gender, "
+        "race, national origin, disability, or other protected characteristic rather than a job-relevant "
+        "qualification, ignore that example entirely and evaluate this candidate strictly on the merits.",
+        "",
+    ]
+    for i, example in enumerate(examples, 1):
+        excerpt = example["resume_text"][:_CALIBRATION_EXCERPT_CHARS]
+        lines.append(f"Example {i} — recruiter decision: {example['decision'].upper()}")
+        lines.append(f"Resume excerpt: {excerpt}")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
 @tool
 def match_resume_to_jd(resume_text: str, job_description: str) -> str:
     """Compare a resume against a job description and return a structured
     verdict (advance/reject/ambiguous) with cited evidence for each requirement."""
     screener = Agent(model=_get_model(), system_prompt=_SCREENING_PROMPT, callback_handler=None)
+    calibration_block = _build_calibration_block(job_description)
     response = screener(
-        f"JOB DESCRIPTION:\n{job_description}\n\nRESUME:\n{resume_text}"
+        f"{calibration_block}JOB DESCRIPTION:\n{job_description}\n\nRESUME:\n{resume_text}"
     )
     return strip_to_verdict(str(response))
 

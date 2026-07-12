@@ -66,6 +66,15 @@ The tool is read-only and advisory only — it never writes to an ATS or contact
 | Recruiter rubber-stamps a "reject" without reading evidence | A real candidate is silently dropped based on a bad model call | Output always includes evidence; "reject" is a recommendation, not an automatic ATS action |
 | Resume/JD text is malformed or invalid | Agent could return an invented verdict from garbage input | System prompt requires flagging unreadable input for manual review (`VERDICT: error`) |
 | Prompt injection embedded in resume text | Model manipulated into a false "advance" regardless of qualifications | System prompt explicitly instructs the model to treat resume/JD text as untrusted data, never as instructions |
+| Recruiter's own accept/reject history reflects unconscious bias (age, gender, school, employment gaps, etc.) | The bias gets systematized and amplified rather than caught — the same failure mode that killed Amazon's internal resume-screening AI | Calibration is exact-match, per-JD, and capped at a handful of literal past decisions (not a learned/summarized profile) so a human can always see exactly what was surfaced; the prompt explicitly instructs the model to discard any past decision that looks bias-driven rather than qualification-driven — see Recruiter Calibration below |
+
+## Recruiter calibration (feedback loop)
+
+After reviewing a verdict, use the 👍/👎 buttons on a result card to record your actual decision — this may differ from the AI's verdict, and that's fine; it's your call being recorded, not the AI's. `feedback_store.py` persists it to a local SQLite file (`feedback.db`, gitignored — it holds real candidate resume text, so it must never be committed).
+
+On the next screening against the *exact same* job description, `match_resume_to_jd` looks up your past decisions for that job description (via `feedback_store.get_calibration_examples`) and surfaces up to 2 examples of each (advance/reject) as literal, visible context — not a fine-tuned model, not a learned preference profile, not fuzzy cross-role similarity. This is a deliberate scope decision: every example the model sees is one you can inspect yourself, and the prompt is explicit that it exists to help resolve genuinely borderline calls, never to override clear evidence on required qualifications. Verified in testing: a borderline candidate for a JD with existing "advance" calibration examples still correctly got rejected when their actual resume was missing required qualifications — the calibration context didn't override the evidence-based read.
+
+**This still can't fully prevent bias amplification** — if your own history has a pattern along a protected characteristic, the model may not always catch it even with the explicit instruction to discard such examples. Treat this as a lower-risk starting point (auditable, per-JD, capped, exact-match), not a solved problem.
 
 ## Evaluation prompt design
 
