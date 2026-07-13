@@ -70,7 +70,7 @@ The tool is read-only and advisory only — it never writes to an ATS or contact
 
 ## Human checkpoint before reject
 
-`reject` is the one verdict with no natural downstream review — `advance` gets a second look at the interview stage, `ambiguous` already routes to a human by design, but a `reject` a recruiter reads and moves past typically never gets revisited. `screen_resume_with_checkpoint()` in `agent.py` (used by `demo.py`) pauses on any `reject` verdict and requires an explicit `yes`/`no` before it's treated as final:
+`reject` is the one verdict with no natural downstream review — `advance` gets a second look at the interview stage, `ambiguous` already routes to a human by design, but a `reject` a recruiter reads and moves past typically never gets revisited. `screen_resume_with_checkpoint()` in `agent.py` (used by `demo.py`) pauses on any `reject` verdict and requires an explicit `yes`/`no` before it's treated as final. The match score (see below) is computed and shown as part of the checkpoint summary itself, before the yes/no prompt — so the recruiter sees it while deciding, not only after:
 
 - **yes** — confirms the reject, logs the decision (candidate name, full evidence, timestamp) to `checkpoint_log.txt` (gitignored — holds real candidate data), and returns the verdict unchanged.
 - **no** — logs the override and downgrades the verdict to `VERDICT: ambiguous (recruiter overrode reject)` rather than silently discarding the reject or flipping it to `advance` — the override itself becomes part of the audit trail.

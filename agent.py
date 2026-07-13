@@ -259,6 +259,8 @@ def run_checkpoint(result: str, candidate_name: str) -> str:
 
 
 def build_checkpoint_summary(result: str, candidate_name: str) -> str:
+    score = parse_result(result).get("score")
+    score_line = f"Match score: {score}/100\n" if score is not None else ""
     return f"""
 ========================================
 CHECKPOINT — Reject verdict for {candidate_name}
@@ -267,7 +269,7 @@ TalentFlow is about to recommend REJECTING this candidate.
 This is the one verdict with no downstream human review —
 if confirmed, this candidate will not be re-screened later.
 
-Here is the full evidence behind this call:
+{score_line}Here is the full evidence behind this call:
 
 {result}
 
