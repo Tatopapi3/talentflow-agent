@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 *.db
 checkpoint_log.txt
+vote_log.txt

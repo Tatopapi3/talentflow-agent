@@ -1,8 +1,13 @@
+import asyncio
 import os
 import re
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import litellm
 from dotenv import load_dotenv
 
 from strands import Agent, tool
@@ -105,13 +110,16 @@ TERMINATION CONDITION
 Produce exactly one verdict per resume and stop. Do not re-evaluate or ask clarifying questions. Once the output schema above has been returned, your turn is complete."""
 
 
+_MODEL_ID = "openrouter/openai/gpt-4o"
+
+
 def _get_model() -> LiteLLMModel:
     return LiteLLMModel(
         client_args={
             "api_base": "https://openrouter.ai/api/v1",
             "api_key": os.environ["OPENROUTER_API_KEY"],
         },
-        model_id="openrouter/openai/gpt-4o",
+        model_id=_MODEL_ID,
         params={"max_tokens": 4096, "temperature": 0},
     )
 
@@ -173,16 +181,24 @@ def _build_calibration_block(job_description: str) -> str:
     return "\n".join(lines)
 
 
+def _run_screening(resume_text: str, job_description: str):
+    """Shared implementation behind match_resume_to_jd. Returns the raw
+    AgentResult (not just its text) so callers that also need token usage
+    for cost tracking (the voting orchestration below) don't have to
+    duplicate this call — match_resume_to_jd itself is untouched, just a
+    thin wrapper over this."""
+    screener = Agent(model=_get_model(), system_prompt=_SCREENING_PROMPT, callback_handler=None)
+    calibration_block = _build_calibration_block(job_description)
+    return screener(
+        f"{calibration_block}JOB DESCRIPTION:\n{job_description}\n\nRESUME:\n{resume_text}"
+    )
+
+
 @tool
 def match_resume_to_jd(resume_text: str, job_description: str) -> str:
     """Compare a resume against a job description and return a structured
     verdict (advance/reject/ambiguous) with cited evidence for each requirement."""
-    screener = Agent(model=_get_model(), system_prompt=_SCREENING_PROMPT, callback_handler=None)
-    calibration_block = _build_calibration_block(job_description)
-    response = screener(
-        f"{calibration_block}JOB DESCRIPTION:\n{job_description}\n\nRESUME:\n{resume_text}"
-    )
-    return strip_to_verdict(str(response))
+    return strip_to_verdict(str(_run_screening(resume_text, job_description)))
 
 
 talentflow_agent = Agent(
@@ -293,6 +309,132 @@ def override_to_ambiguous(result: str) -> str:
     # "No" downgrades to ambiguous rather than silently discarding the
     # reject or flipping it to advance.
     return result.replace("VERDICT: reject", "VERDICT: ambiguous (recruiter overrode reject)", 1)
+
+
+VOTE_LOG_PATH = Path(__file__).parent / "vote_log.txt"
+
+
+def _estimate_cost_usd(usage: dict) -> float:
+    """Real dollar estimate from actual token counts, using litellm's own
+    maintained per-model pricing table (not a hardcoded, easily-stale rate)."""
+    pricing = litellm.model_cost.get(_MODEL_ID, {})
+    input_cost = pricing.get("input_cost_per_token", 0)
+    output_cost = pricing.get("output_cost_per_token", 0)
+    return usage.get("inputTokens", 0) * input_cost + usage.get("outputTokens", 0) * output_cost
+
+
+def _cast_vote(resume_text: str, job_description: str) -> dict:
+    """One vote: run the screening once, timed, with real token/cost figures
+    attached — this is what runs in each thread pool worker."""
+    start = time.monotonic()
+    response = _run_screening(resume_text, job_description)
+    elapsed = time.monotonic() - start
+    usage = response.metrics.accumulated_usage
+    return {
+        "result": strip_to_verdict(str(response)),
+        "elapsed_seconds": round(elapsed, 3),
+        "input_tokens": usage.get("inputTokens", 0),
+        "output_tokens": usage.get("outputTokens", 0),
+        "cost_usd": round(_estimate_cost_usd(usage), 6),
+    }
+
+
+async def vote_on_resume(resume_text: str, job_description: str, n_votes: int = 3) -> list[dict]:
+    """Run the screening n_votes times in parallel and return each vote's
+    raw result plus its latency/token/cost figures. The underlying Agent
+    call is synchronous (not native asyncio), so this uses a thread pool
+    rather than true concurrent I/O — the 3 calls still overlap instead of
+    running one after another, so wall-clock latency stays roughly flat
+    instead of tripling."""
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=n_votes) as executor:
+        tasks = [
+            loop.run_in_executor(executor, _cast_vote, resume_text, job_description)
+            for _ in range(n_votes)
+        ]
+        return await asyncio.gather(*tasks)
+
+
+def log_vote_metrics(candidate_name: str, votes: list[dict]) -> None:
+    """Log real cost/latency/token figures per screening — voting triples
+    API spend per resume, so tuning n_votes later (e.g. down to 2) should be
+    based on measured numbers, not a guess."""
+    total_cost = sum(v["cost_usd"] for v in votes)
+    total_tokens = sum(v["input_tokens"] + v["output_tokens"] for v in votes)
+    wall_clock = max(v["elapsed_seconds"] for v in votes)  # votes run in parallel, not summed
+    with open(VOTE_LOG_PATH, "a") as f:
+        f.write(
+            f"{datetime.now(timezone.utc).isoformat()} | {candidate_name} | "
+            f"votes={len(votes)} | wall_clock_seconds={wall_clock:.2f} | "
+            f"total_tokens={total_tokens} | total_cost_usd={total_cost:.6f}\n"
+        )
+
+
+def aggregate_votes(votes: list[dict]) -> str:
+    """Aggregate n parallel votes into a single verdict. Unanimous votes
+    return as-is — confidence stands, exactly like a single-run result. A
+    split vote is downgraded to ambiguous regardless of what the individual
+    verdicts were: the disagreement itself is the signal that this case
+    needs a human, not a rubber-stamped confident label. Reuses
+    parse_verdict rather than re-deriving verdicts from scratch."""
+    results = [v["result"] for v in votes]
+    verdicts = [parse_verdict(r) for r in results]
+
+    if len(set(verdicts)) == 1:
+        return results[0]
+
+    return build_ambiguous_from_split(results, verdicts)
+
+
+def build_ambiguous_from_split(results: list[str], verdicts: list[str]) -> str:
+    """Build the aggregated output when votes split. MATCHED/MISSING/
+    HIGHLIGHT MORE (and the score computed from them) come from one
+    representative run — whichever verdict a majority of votes share, or
+    run 1 if all three disagreed — so the returned schema stays exactly as
+    parseable as a single-run result; nothing downstream (score, the
+    checkpoint, parse_result) has to change to handle it.
+
+    The full text of every run is printed directly to the terminal instead
+    of spliced into the returned string: each run's raw text contains the
+    same section headers (MATCHED REQUIREMENTS:, etc.) that extract_section
+    searches for, so embedding them in the return value risks silently
+    truncating the representative run's own sections. Printing keeps the
+    disagreement fully visible without that risk."""
+    majority_verdict = Counter(verdicts).most_common(1)[0][0]
+    representative_idx = next(i for i, v in enumerate(verdicts) if v == majority_verdict)
+    representative = results[representative_idx]
+
+    vote_summary = ", ".join(f"vote {i + 1}: {v}" for i, v in enumerate(verdicts))
+    aggregated = re.sub(
+        r"^VERDICT:\s*\w+", f"VERDICT: ambiguous (split vote — {vote_summary})", representative, count=1
+    )
+    aggregated = re.sub(r"CONFIDENCE:\s*\w+", "CONFIDENCE: low", aggregated, count=1)
+
+    print(f"\n{'=' * 60}\nVOTES SPLIT ({vote_summary})\nFull evidence from all {len(results)} runs:\n{'=' * 60}")
+    for i, (result, verdict) in enumerate(zip(results, verdicts), start=1):
+        print(f"\n--- Vote {i} ({verdict}) ---\n{result}")
+    print(f"{'=' * 60}\n")
+
+    return aggregated
+
+
+def screen_resume_with_voting(
+    resume_text: str, job_description: str, candidate_name: str = "this candidate", n_votes: int = 3
+) -> str:
+    """Runs match_resume_to_jd n_votes times in parallel and aggregates them
+    (vote_on_resume / aggregate_votes), then checkpoints on the aggregated
+    result exactly as screen_resume_with_checkpoint does on a single-call
+    result — reusing run_checkpoint directly rather than modifying it, so
+    voting sits upstream of the checkpoint without changing its logic."""
+    votes = asyncio.run(vote_on_resume(resume_text, job_description, n_votes))
+    log_vote_metrics(candidate_name, votes)
+    result = aggregate_votes(votes)
+
+    verdict = parse_verdict(result)
+    if verdict != "reject":
+        return result
+
+    return run_checkpoint(result, candidate_name)
 
 
 SECTION_HEADERS = ("MATCHED REQUIREMENTS:", "MISSING REQUIREMENTS:", "HIGHLIGHT MORE:")
