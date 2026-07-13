@@ -8,4 +8,6 @@ dependencies = [
     "litellm",
     "python-dotenv",
     "flask",
+    "pypdf",
+    "python-docx",
 ]

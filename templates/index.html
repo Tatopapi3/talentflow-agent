@@ -9,15 +9,24 @@
 <body>
   <div class="page">
     <header>
-      <h1>TalentFlow</h1>
+      <h1>HR Talent AI Agent</h1>
       <p class="tagline">Your AI resume-screening assistant</p>
     </header>
 
     <div class="robot-stage">
       <div class="robot" id="robot" data-state="idle">
-        <svg viewBox="0 0 240 220" width="192" height="176" aria-hidden="true">
+        <svg viewBox="0 0 240 250" width="192" height="200" aria-hidden="true">
           <line x1="120" y1="10" x2="120" y2="32" stroke="#8fa6b8" stroke-width="4" stroke-linecap="round" class="antenna-rod"/>
           <circle id="antenna-tip" cx="120" cy="8" r="7"/>
+
+          <g id="leg-l">
+            <rect x="86" y="200" width="18" height="26" rx="9"/>
+            <ellipse cx="95" cy="228" rx="16" ry="8"/>
+          </g>
+          <g id="leg-r">
+            <rect x="136" y="200" width="18" height="26" rx="9"/>
+            <ellipse cx="145" cy="228" rx="16" ry="8"/>
+          </g>
 
           <rect id="arm-l" x="51" y="158" width="26" height="48" rx="13"/>
           <circle id="shoulder-l" cx="76" cy="164" r="15"/>
@@ -43,12 +52,30 @@
       <div class="speech-bubble" id="speech">Ready when you are &mdash; paste a job description and a resume below.</div>
     </div>
 
-    <form id="screen-form" class="panel">
-      <label for="jd">Job description</label>
-      <textarea id="jd" rows="6" placeholder="Paste the job description here..." required></textarea>
+    <details class="how-to-use">
+      <summary>💡 How to use</summary>
+      <p>Upload a candidate's resume (PDF, DOCX, or TXT) or paste the text directly on the left. Paste the job description on the right, then click Screen this resume. TalentFlow will compare the two and tell you whether to advance, reject, or take a closer look — with the evidence cited. After you review a result, use the 👍/👎 buttons to record your actual call — TalentFlow will surface those past decisions as calibration context the next time you screen a candidate against that same job description.</p>
+    </details>
 
-      <label for="resume">Resume</label>
-      <textarea id="resume" rows="8" placeholder="Paste a candidate's resume here..." required></textarea>
+    <form id="screen-form" class="panel">
+      <div class="form-grid">
+        <div class="form-col">
+          <label for="resume-file">Upload resume (PDF, DOCX, or TXT)</label>
+          <div class="upload-box">
+            <input type="file" id="resume-file" accept=".pdf,.docx,.txt" hidden>
+            <button type="button" id="upload-btn">📎 Upload</button>
+            <span id="upload-filename" class="upload-filename">200MB per file &middot; PDF, DOCX, TXT</span>
+          </div>
+
+          <label for="resume">Or paste resume text here</label>
+          <textarea id="resume" rows="10" placeholder="Paste a candidate's resume here..."></textarea>
+        </div>
+
+        <div class="form-col">
+          <label for="jd">Paste the job description</label>
+          <textarea id="jd" rows="17" placeholder="Paste the job description here..." required></textarea>
+        </div>
+      </div>
 
       <button type="submit" id="submit-btn">Screen this resume</button>
     </form>

@@ -1,11 +1,11 @@
 const ROBOT_STATES = {
   idle: {
-    head: "#f2e4b8", body: "#e3bf5c", antenna: "#b8860b",
+    head: "#ffffff", body: "#ffffff", antenna: "#0072bb",
     mouth: "M 95 118 Q 120 122 145 118",
     speech: "Hi, I'm your TalentFlow AI agent — paste a job description and a resume below and I'll screen it.",
   },
   thinking: {
-    head: "#f7ecc9", body: "#f0d27a", antenna: "#c9980f",
+    head: "#eaf3fb", body: "#dbeaf7", antenna: "#00568c",
     mouth: "M 100 120 Q 120 116 140 120",
     speech: "Reading the resume against the job description…",
   },
@@ -96,30 +96,102 @@ function renderResultCard(result) {
     return card;
   }
 
-  const listItems = (items) =>
+  const GENERIC_MISSING = "no evidence found in resume";
+
+  const requirementItems = (items, annotationKey, emptyNote) =>
+    items.length
+      ? items.map((item) => {
+          const showDetail = item.detail && item.detail.toLowerCase() !== GENERIC_MISSING;
+          const priorityTag = item.priority === "nice-to-have" ? "nice-to-have" : "required";
+          const annotation = item[annotationKey];
+          return `
+          <li>
+            <span class="req-name">${escapeHtml(item.requirement)}</span>
+            <span class="priority-tag priority-${priorityTag}">${priorityTag}</span>
+            ${showDetail ? `<span class="req-detail">${escapeHtml(item.detail)}</span>` : ""}
+            ${annotation ? `<span class="req-annotation">${escapeHtml(annotation)}</span>` : ""}
+          </li>
+        `;
+        }).join("")
+      : `<li class="empty-note">${emptyNote}</li>`;
+
+  const highlightItems = (items) =>
     items.length
       ? items.map((item) => `
           <li>
-            <span class="req-name">${escapeHtml(item.requirement)}</span>
-            <span class="req-detail">${escapeHtml(item.detail)}</span>
+            <span class="req-name">${escapeHtml(item.detail)}</span>
+            ${item.current_mention ? `<span class="req-detail">"${escapeHtml(item.current_mention)}"</span>` : ""}
+            ${item.requirement ? `<span class="req-annotation">Addresses: ${escapeHtml(item.requirement)}</span>` : ""}
+            ${item.suggestion ? `<span class="req-annotation">${escapeHtml(item.suggestion)}</span>` : ""}
           </li>
         `).join("")
-      : '<li><span class="req-detail">None</span></li>';
+      : '<li class="empty-note">Nothing to highlight — the resume already presents this clearly.</li>';
+
+  const score = typeof result.score === "number" ? result.score : null;
+  const scoreClass = score === null ? "" : score >= 75 ? "score-high" : score >= 50 ? "score-mid" : "score-low";
 
   card.innerHTML = `
     <div class="verdict-row">
       <span class="verdict-badge ${result.verdict}">${result.verdict}</span>
+      ${score !== null ? `<span class="score-badge ${scoreClass}">${score}<span class="score-max">/100</span></span>` : ""}
       <span class="confidence">Confidence: ${escapeHtml(result.confidence || "")}</span>
     </div>
-    <div class="req-section">
-      <h4>Matched requirements</h4>
-      <ul class="req-list">${listItems(result.matched || [])}</ul>
+    <div class="tab-buttons">
+      <button type="button" class="tab-btn active" data-tab="aligned">✅ Aligned Skills</button>
+      <button type="button" class="tab-btn" data-tab="highlight">💡 Highlight More</button>
+      <button type="button" class="tab-btn" data-tab="gaps">⚠️ Gaps</button>
     </div>
-    <div class="req-section">
-      <h4>Missing requirements</h4>
-      <ul class="req-list">${listItems(result.missing || [])}</ul>
+    <div class="tab-panel" data-panel="aligned">
+      <ul class="req-list">${requirementItems(result.matched || [], "relevance", "No aligned skills found.")}</ul>
+    </div>
+    <div class="tab-panel" data-panel="highlight" hidden>
+      <ul class="req-list">${highlightItems(result.highlights || [])}</ul>
+    </div>
+    <div class="tab-panel" data-panel="gaps" hidden>
+      <ul class="req-list">${requirementItems(result.missing || [], "importance", "No gaps found.")}</ul>
+    </div>
+    <div class="feedback-row">
+      <span class="feedback-label">Your actual call on this candidate:</span>
+      <button type="button" class="feedback-btn feedback-advance" data-decision="advance">👍 I'd advance them</button>
+      <button type="button" class="feedback-btn feedback-reject" data-decision="reject">👎 Not a fit</button>
+      <span class="feedback-note"></span>
     </div>
   `;
+
+  card.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      card.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      card.querySelectorAll(".tab-panel").forEach((p) => { p.hidden = true; });
+      btn.classList.add("active");
+      card.querySelector(`.tab-panel[data-panel="${btn.dataset.tab}"]`).hidden = false;
+    });
+  });
+
+  const feedbackNote = card.querySelector(".feedback-note");
+  card.querySelectorAll(".feedback-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      card.querySelectorAll(".feedback-btn").forEach((b) => { b.disabled = true; });
+      try {
+        const response = await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            job_description: result.job_description,
+            resume_text: result.resume_text,
+            decision: btn.dataset.decision,
+          }),
+        });
+        const body = await response.json();
+        feedbackNote.textContent = body.status === "ok"
+          ? "Saved — I'll factor this in for future candidates against this same job description."
+          : "Couldn't save that — try again.";
+      } catch (err) {
+        feedbackNote.textContent = "Couldn't save that — try again.";
+        card.querySelectorAll(".feedback-btn").forEach((b) => { b.disabled = false; });
+      }
+    });
+  });
+
   return card;
 }
 
@@ -129,19 +201,57 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+const DEFAULT_UPLOAD_HINT = "200MB per file · PDF, DOCX, TXT";
+
 document.addEventListener("DOMContentLoaded", () => {
   setRobotState("idle");
 
   const form = document.getElementById("screen-form");
   const submitBtn = document.getElementById("submit-btn");
   const results = document.getElementById("results");
+  const resumeFileInput = document.getElementById("resume-file");
+  const uploadBtn = document.getElementById("upload-btn");
+  const uploadFilename = document.getElementById("upload-filename");
+  const resumeTextarea = document.getElementById("resume");
+
+  uploadBtn.addEventListener("click", () => resumeFileInput.click());
+
+  resumeFileInput.addEventListener("change", () => {
+    if (resumeFileInput.files.length) {
+      uploadFilename.textContent = resumeFileInput.files[0].name;
+      resumeTextarea.value = "";
+      resumeTextarea.disabled = true;
+      resumeTextarea.placeholder = "Using uploaded file — clear it above to paste text instead.";
+    } else {
+      uploadFilename.textContent = DEFAULT_UPLOAD_HINT;
+      resumeTextarea.disabled = false;
+      resumeTextarea.placeholder = "Paste a candidate's resume here...";
+    }
+  });
+
+  function resetResumeInputs() {
+    resumeFileInput.value = "";
+    uploadFilename.textContent = DEFAULT_UPLOAD_HINT;
+    resumeTextarea.value = "";
+    resumeTextarea.disabled = false;
+    resumeTextarea.placeholder = "Paste a candidate's resume here...";
+  }
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
 
     const jobDescription = document.getElementById("jd").value.trim();
-    const resumeText = document.getElementById("resume").value.trim();
-    if (!jobDescription || !resumeText) return;
+    const resumeText = resumeTextarea.value.trim();
+    const hasFile = resumeFileInput.files.length > 0;
+    if (!jobDescription || !(hasFile || resumeText)) return;
+
+    const formData = new FormData();
+    formData.append("job_description", jobDescription);
+    if (hasFile) {
+      formData.append("resume_file", resumeFileInput.files[0]);
+    } else {
+      formData.append("resume_text", resumeText);
+    }
 
     submitBtn.disabled = true;
     submitBtn.textContent = "Screening…";
@@ -150,14 +260,13 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       const response = await fetch("/api/screen", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resume_text: resumeText, job_description: jobDescription }),
+        body: formData,
       });
       const result = await response.json();
 
       setRobotState(result.verdict === "error" ? "error" : result.verdict);
       results.prepend(renderResultCard(result));
-      document.getElementById("resume").value = "";
+      resetResumeInputs();
     } catch (err) {
       setRobotState("error", "Something went wrong talking to the server.");
     } finally {

@@ -11,8 +11,12 @@ Recruiters spend ~23 hours per hire manually screening 50–200+ resumes, and at
 `match_resume_to_jd(resume_text, job_description)` sends both texts to an LLM (via `LiteLLMModel`/OpenRouter) with a system prompt that:
 
 - Requires citing the exact resume phrase behind every matched/missing requirement (no inferred skills)
+- Tags every requirement `(required)` or `(nice-to-have)` per the job description's own framing, and appends a brief relevance/importance clause to each
+- Surfaces up to 3 additional resume details that are relevant but under-emphasized (`HIGHLIGHT MORE`), with a concrete reframing suggestion — never inventing anything not already in the resume
 - Returns exactly one of `advance | reject | ambiguous` — flags terminology mismatches as `ambiguous` rather than guessing
 - Treats resume/JD text as untrusted data, never as instructions (resumes are attacker-controllable — see Blast Radius below)
+
+`agent.parse_result(raw)` turns that raw text into a structured dict — `verdict`, `confidence`, `matched`, `missing`, `highlights`, and a **deterministic 1-100 `score`**. The score is computed in code from the parsed matched/missing lists (required items weighted 3x a nice-to-have), not asked of the model directly — an LLM-generated number would be exactly as run-to-run inconsistent as verdicts have shown themselves to be elsewhere in this project. Both `server.py` and `demo.py` use this shared parser.
 
 `talentflow_agent` is a `strands.Agent` wired with this tool and the same system prompt, matching the spec's required shape. Its own final natural-language turn can re-derive a verdict instead of relaying the tool's, and occasionally disagrees with it — so `screen_resume(resume_text, job_description)` runs `talentflow_agent` but pulls `match_resume_to_jd`'s actual result straight out of the tool-call record in the conversation history, guaranteeing the agent relays rather than re-derives. `demo.py` uses `screen_resume`.
 
@@ -44,6 +48,14 @@ Run the interactive demo — paste one job description, then paste resumes one a
 python demo.py
 ```
 
+Run the web UI (paste a JD, then either upload a resume as PDF/DOCX/TXT or paste the text) — see the robot mascot react to each verdict:
+
+```bash
+python server.py
+```
+
+Then open **http://localhost:8000**.
+
 ## Blast radius
 
 The tool is read-only and advisory only — it never writes to an ATS or contacts a candidate. Worst case: it misreads a resume and contributes to a wrong "reject" recommendation, but a recruiter reviews the cited evidence before any real action is taken.
@@ -51,9 +63,30 @@ The tool is read-only and advisory only — it never writes to an ATS or contact
 | Failure mode | Worst-case impact | Safeguard |
 |---|---|---|
 | Agent infers a skill not actually stated | Qualified candidate marked "missing" on a requirement they do have | System prompt forbids inference; every judgment must cite an exact resume phrase |
-| Recruiter rubber-stamps a "reject" without reading evidence | A real candidate is silently dropped based on a bad model call | Output always includes evidence; "reject" is a recommendation, not an automatic ATS action |
+| Recruiter rubber-stamps a "reject" without reading evidence | A real candidate is silently dropped based on a bad model call | Output always includes evidence; "reject" is a recommendation, not an automatic ATS action. In `demo.py`, a "reject" verdict also can't finalize without an explicit yes/no confirmation — see Human checkpoint below |
 | Resume/JD text is malformed or invalid | Agent could return an invented verdict from garbage input | System prompt requires flagging unreadable input for manual review (`VERDICT: error`) |
 | Prompt injection embedded in resume text | Model manipulated into a false "advance" regardless of qualifications | System prompt explicitly instructs the model to treat resume/JD text as untrusted data, never as instructions |
+| Recruiter's own accept/reject history reflects unconscious bias (age, gender, school, employment gaps, etc.) | The bias gets systematized and amplified rather than caught — the same failure mode that killed Amazon's internal resume-screening AI | Calibration is exact-match, per-JD, and capped at a handful of literal past decisions (not a learned/summarized profile) so a human can always see exactly what was surfaced; the prompt explicitly instructs the model to discard any past decision that looks bias-driven rather than qualification-driven — see Recruiter Calibration below |
+
+## Human checkpoint before reject
+
+`reject` is the one verdict with no natural downstream review — `advance` gets a second look at the interview stage, `ambiguous` already routes to a human by design, but a `reject` a recruiter reads and moves past typically never gets revisited. `screen_resume_with_checkpoint()` in `agent.py` (used by `demo.py`) pauses on any `reject` verdict and requires an explicit `yes`/`no` before it's treated as final. The match score (see below) is computed and shown as part of the checkpoint summary itself, before the yes/no prompt — so the recruiter sees it while deciding, not only after:
+
+- **yes** — confirms the reject, logs the decision (candidate name, full evidence, timestamp) to `checkpoint_log.txt` (gitignored — holds real candidate data), and returns the verdict unchanged.
+- **no** — logs the override and downgrades the verdict to `VERDICT: ambiguous (recruiter overrode reject)` rather than silently discarding the reject or flipping it to `advance` — the override itself becomes part of the audit trail.
+- `advance` and `ambiguous` pass straight through, no interruption.
+
+Built on `screen_resume()` rather than calling `talentflow_agent` directly — the agent's own final turn can re-derive a different verdict than the tool actually determined (see `screen_resume`'s docstring above), and a checkpoint built on an unreliable source of truth would be worse than no checkpoint at all.
+
+**CLI-only, deliberately**: the checkpoint blocks on a real `input()` call, which only makes sense in `demo.py`'s interactive terminal loop. `server.py`'s web UI still uses plain `screen_resume()` — a blocking terminal prompt inside a Flask request would just hang the server, since no browser can answer it. Bringing an equivalent confirm-before-reject step to the web app would need a genuinely different mechanism (e.g. a pending-confirmation state surfaced back to the page), not this same function.
+
+## Recruiter calibration (feedback loop)
+
+After reviewing a verdict, use the 👍/👎 buttons on a result card to record your actual decision — this may differ from the AI's verdict, and that's fine; it's your call being recorded, not the AI's. `feedback_store.py` persists it to a local SQLite file (`feedback.db`, gitignored — it holds real candidate resume text, so it must never be committed).
+
+On the next screening against the *exact same* job description, `match_resume_to_jd` looks up your past decisions for that job description (via `feedback_store.get_calibration_examples`) and surfaces up to 2 examples of each (advance/reject) as literal, visible context — not a fine-tuned model, not a learned preference profile, not fuzzy cross-role similarity. This is a deliberate scope decision: every example the model sees is one you can inspect yourself, and the prompt is explicit that it exists to help resolve genuinely borderline calls, never to override clear evidence on required qualifications. Verified in testing: a borderline candidate for a JD with existing "advance" calibration examples still correctly got rejected when their actual resume was missing required qualifications — the calibration context didn't override the evidence-based read.
+
+**This still can't fully prevent bias amplification** — if your own history has a pattern along a protected characteristic, the model may not always catch it even with the explicit instruction to discard such examples. Treat this as a lower-risk starting point (auditable, per-JD, capped, exact-match), not a solved problem.
 
 ## Evaluation prompt design
 
@@ -66,6 +99,8 @@ Beyond the base spec (cite evidence, never infer, treat resume/JD text as untrus
 - **One entry per requirement**: each requirement appears in exactly one of MATCHED or MISSING, never both, never split across reworded duplicates.
 
 `test_tools.py` cases 5 and 6 are regression tests for the first two rules specifically — both were found by running a real resume through the tool and catching the model citing irrelevant evidence as a match.
+
+- **HIGHLIGHT MORE accountability**: this section is held to the same evidence-citation standard as MATCHED/MISSING — every item must quote the resume's current phrasing, name the exact requirement (from the same MATCHED/MISSING list already produced) it would help address, and explain why expanding it would move the verdict, not just "look better." If nothing in the resume could plausibly be expanded to help a given gap, the model states that explicitly (`"No resume content found that could be expanded to address <requirement>"`) rather than forcing a generic tip. `parse_highlight_lines` in `agent.py` extracts this into a `requirement` field, surfaced in the web UI as `Addresses: <requirement>`. `test_tools.py` case 8 asserts every HIGHLIGHT MORE item actually references a requirement name pulled from that same output's MATCHED or MISSING list, not an invented category.
 
 ## Known limitations
 

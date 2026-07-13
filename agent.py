@@ -1,8 +1,14 @@
 import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 from strands import Agent, tool
 from strands.models.litellm import LiteLLMModel
+
+import feedback_store
 
 load_dotenv()
 
@@ -60,7 +66,23 @@ Your VERDICT must be logically consistent with your own MATCHED and MISSING list
 If you find yourself about to list something under MATCHED that fails the EVIDENCE RELEVANCE check, move it to MISSING instead and adjust the verdict accordingly — never leave a mismatch between what you listed and what you conclude.
 
 ONE ENTRY PER REQUIREMENT
-First, extract the job description's distinct requirements as a fixed list (merge any requirement that is restated in multiple places, e.g. under both a responsibilities section and a qualifications section, into a single entry — do not list the same underlying requirement twice under different wording). Then classify each one exactly once as matched or missing; the same requirement must never appear in both lists. Under MISSING REQUIREMENTS, the text after the colon must be exactly "no evidence found in resume" — never quote the job description's own requirement text there, and never explain further. The only exception is the ambiguous case described under TERMINOLOGY, where you instead name the specific tension.
+First, extract the job description's distinct requirements as a fixed list (merge any requirement that is restated in multiple places, e.g. under both a responsibilities section and a qualifications section, into a single entry — do not list the same underlying requirement twice under different wording). Then classify each one exactly once as matched or missing; the same requirement must never appear in both lists. Under MISSING REQUIREMENTS, the text after the colon must be exactly "no evidence found in resume", optionally followed by " — importance: " and one brief clause on why this specific gap matters for the role — never quote the job description's own requirement text there. The only exception is the ambiguous case described under TERMINOLOGY, where you instead name the specific tension (no importance suffix in that case).
+
+PRIORITY TAGGING
+Every requirement you list — matched or missing — must be tagged with exactly one priority, as the job description itself presents it: (required) for anything under a "Required," "Must have," or similarly-framed core section, or for any requirement in a job description that does not separate required from optional at all. Use (nice-to-have) only for requirements the job description explicitly frames as optional, preferred, or bonus (e.g. "Nice to have," "Preferred," "Bonus points for"). This tag is used downstream to compute a match score, so it must reflect the job description's own framing, not your judgment of how important the skill actually is.
+
+RELEVANCE
+For every entry under MATCHED REQUIREMENTS, follow the quoted evidence with " — relevance: " and one brief clause explaining why that evidence matters for this specific role (not a generic statement about the skill in general).
+
+HIGHLIGHTS
+After classifying matched and missing requirements, separately identify up to 3 additional details already present in the resume that could serve as evidence for a requirement you just listed under MISSING REQUIREMENTS, or that would meaningfully strengthen a requirement already under MATCHED REQUIREMENTS. This section is held to the same evidence-citation standard as the rest of the schema — never a standalone, generic resume-coaching tip. Every item must:
+- Quote the resume's current phrasing of the detail.
+- Name the exact requirement it would help address, using the identical requirement name already used under MATCHED or MISSING REQUIREMENTS above — never inventing a new category name.
+- Suggest one concrete, specific way to reframe or expand that detail, and explain why doing so would close or strengthen that specific gap (not just "look better").
+Never invent achievements, numbers, or scope not already in the resume — only suggest better framing of what is genuinely there. Do not force a connection that does not exist: if no resume content could plausibly be expanded to address a given missing requirement, do not manufacture a suggestion for it — either omit that item entirely, or state so explicitly (e.g. "No resume content found that could be expanded to address requirement-name") rather than offering advice that would not actually help. If nothing meaningfully expandable exists at all, leave this section with just the header and no items.
+
+EMPTY SECTIONS
+If every requirement is matched, write the MISSING REQUIREMENTS header with nothing after it — no placeholder line, and never write "none," "n/a," "-," or any other filler as if it were a requirement. The same applies to MATCHED REQUIREMENTS in the rare case nothing at all is matched, and to HIGHLIGHT MORE when there is nothing worth surfacing. A section with no items is simply the header followed by the next section (or the end of the schema).
 
 OUTPUT SCHEMA
 Respond with ONLY the schema block below. Your response must start with "VERDICT:" as the very first characters — no reasoning, analysis, or preamble before it, and no commentary after it. Replace requirement-name and evidence-phrase with actual text; do not include literal square brackets or angle brackets in your output.
@@ -68,9 +90,11 @@ Respond with ONLY the schema block below. Your response must start with "VERDICT
 VERDICT: advance | reject | ambiguous
 CONFIDENCE: high | low
 MATCHED REQUIREMENTS:
-- requirement-name: "exact resume phrase or line as evidence"
+- requirement-name (required | nice-to-have): "exact resume phrase or line as evidence" — relevance: why this matters for this role
 MISSING REQUIREMENTS:
-- requirement-name: no evidence found in resume
+- requirement-name (required | nice-to-have): no evidence found in resume — importance: why this gap matters for this role
+HIGHLIGHT MORE:
+- resume-detail-name: "current resume phrasing" — this is your strongest available evidence for requirement-name (currently matched | currently missing) — suggestion: concrete way to reframe or expand it that would close or strengthen that specific gap
 
 If the resume or job description text is empty, unreadable, or clearly not a resume/JD, output only:
 
@@ -101,13 +125,62 @@ def strip_to_verdict(text: str) -> str:
     return text[verdict_idx:] if verdict_idx != -1 else text
 
 
+def parse_verdict(output: str) -> str:
+    """Extract the VERDICT: value (e.g. "advance", "reject", "ambiguous",
+    "error") from raw schema text. Empty string if not present."""
+    match = re.match(r"VERDICT:\s*(\w+)", output)
+    return match.group(1) if match else ""
+
+
+_CALIBRATION_EXCERPT_CHARS = 800
+
+
+def _build_calibration_block(job_description: str) -> str:
+    """Build a prompt block surfacing this recruiter's own past decisions
+    on other candidates for this exact job description, if any exist.
+
+    Deliberately conservative: examples are used only to break ties on
+    genuinely borderline cases, never to override clear evidence on
+    required qualifications, and the model is explicitly told to ignore
+    any past decision that looks like it reflects a protected
+    characteristic rather than a job-relevant qualification — training an
+    agent to mimic a recruiter's raw historical pattern risks silently
+    learning and amplifying whatever bias is already in that history
+    (the same failure mode that killed Amazon's internal resume-screening
+    tool). This stays a small set of visible, literal past decisions —
+    not a learned or summarized "preference profile" — so a human can
+    always see exactly what the model was shown."""
+    examples = feedback_store.get_calibration_examples(job_description)
+    if not examples:
+        return ""
+
+    lines = [
+        "RECRUITER CALIBRATION EXAMPLES",
+        "This recruiter has already made real decisions on other candidates for this exact job description. "
+        "Use them only to help resolve a genuinely borderline call on THIS candidate — never to override clear "
+        "evidence about required qualifications. If a past decision appears to reflect a candidate's age, gender, "
+        "race, national origin, disability, or other protected characteristic rather than a job-relevant "
+        "qualification, ignore that example entirely and evaluate this candidate strictly on the merits.",
+        "",
+    ]
+    for i, example in enumerate(examples, 1):
+        excerpt = example["resume_text"][:_CALIBRATION_EXCERPT_CHARS]
+        lines.append(f"Example {i} — recruiter decision: {example['decision'].upper()}")
+        lines.append(f"Resume excerpt: {excerpt}")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
 @tool
 def match_resume_to_jd(resume_text: str, job_description: str) -> str:
     """Compare a resume against a job description and return a structured
     verdict (advance/reject/ambiguous) with cited evidence for each requirement."""
     screener = Agent(model=_get_model(), system_prompt=_SCREENING_PROMPT, callback_handler=None)
+    calibration_block = _build_calibration_block(job_description)
     response = screener(
-        f"JOB DESCRIPTION:\n{job_description}\n\nRESUME:\n{resume_text}"
+        f"{calibration_block}JOB DESCRIPTION:\n{job_description}\n\nRESUME:\n{resume_text}"
     )
     return strip_to_verdict(str(response))
 
@@ -142,3 +215,215 @@ def screen_resume(resume_text: str, job_description: str) -> str:
                 return "".join(c.get("text", "") for c in tool_result["content"])
 
     raise RuntimeError("talentflow_agent did not call match_resume_to_jd")
+
+
+CHECKPOINT_LOG_PATH = Path(__file__).parent / "checkpoint_log.txt"
+
+
+def screen_resume_with_checkpoint(
+    resume_text: str, job_description: str, candidate_name: str = "this candidate"
+) -> str:
+    """Runs screen_resume(), then checkpoints before finalizing any REJECT
+    verdict. ADVANCE and AMBIGUOUS pass through with no interruption.
+
+    Why only reject: per the Blast Radius table, "reject" is the one verdict
+    with no downstream human review — once a recruiter reads "reject" and
+    moves on, that candidate typically never gets a second look. "Advance"
+    gets a natural second look at the interview stage, and "ambiguous"
+    already routes to a human by design.
+
+    Built on screen_resume() rather than calling talentflow_agent directly —
+    the agent's own final turn can re-derive a different verdict than the
+    tool actually determined (see screen_resume's docstring), and a
+    checkpoint built on an unreliable source of truth would be worse than no
+    checkpoint at all."""
+    result = screen_resume(resume_text=resume_text, job_description=job_description)
+    verdict = parse_verdict(result)
+
+    if verdict != "reject":
+        return result
+
+    return run_checkpoint(result, candidate_name)
+
+
+def run_checkpoint(result: str, candidate_name: str) -> str:
+    summary = build_checkpoint_summary(result, candidate_name)
+    print(summary)
+
+    while True:
+        answer = input("\nConfirm reject? (yes/no): ").strip().lower()
+        if answer in ("yes", "y"):
+            log_checkpoint_decision(candidate_name, result, confirmed=True)
+            return result
+        elif answer in ("no", "n"):
+            log_checkpoint_decision(candidate_name, result, confirmed=False)
+            return override_to_ambiguous(result)
+        else:
+            print("Please answer 'yes' or 'no'.")
+
+
+def build_checkpoint_summary(result: str, candidate_name: str) -> str:
+    score = parse_result(result).get("score")
+    score_line = f"Match score: {score}/100\n" if score is not None else ""
+    return f"""
+========================================
+CHECKPOINT — Reject verdict for {candidate_name}
+========================================
+TalentFlow is about to recommend REJECTING this candidate.
+This is the one verdict with no downstream human review —
+if confirmed, this candidate will not be re-screened later.
+
+{score_line}Here is the full evidence behind this call:
+
+{result}
+
+========================================
+"""
+
+
+def log_checkpoint_decision(candidate_name: str, result: str, confirmed: bool) -> None:
+    with open(CHECKPOINT_LOG_PATH, "a") as f:
+        f.write(
+            f"{datetime.now(timezone.utc).isoformat()} | {candidate_name} | "
+            f"confirmed={confirmed}\n{result}\n---\n"
+        )
+
+
+def override_to_ambiguous(result: str) -> str:
+    # "No" downgrades to ambiguous rather than silently discarding the
+    # reject or flipping it to advance.
+    return result.replace("VERDICT: reject", "VERDICT: ambiguous (recruiter overrode reject)", 1)
+
+
+SECTION_HEADERS = ("MATCHED REQUIREMENTS:", "MISSING REQUIREMENTS:", "HIGHLIGHT MORE:")
+_PRIORITY_PATTERN = re.compile(r"^(.*?)\s*\((required|nice-to-have)\)\s*$", re.IGNORECASE)
+
+
+def extract_section(output: str, header: str) -> str:
+    """Return the text under a schema section header, up to whichever
+    known header comes next (or end of string)."""
+    if header not in output:
+        return ""
+    start = output.index(header) + len(header)
+    end = len(output)
+    for other in SECTION_HEADERS:
+        if other == header:
+            continue
+        idx = output.find(other, start)
+        if idx != -1:
+            end = min(end, idx)
+    return output[start:end]
+
+
+_PLACEHOLDER_LINES = {"none", "n/a", "na", "-", "no missing requirements", "no matched requirements"}
+
+
+def _split_annotation(text: str, keyword: str) -> tuple[str, str]:
+    """Split a detail string on ' — {keyword}: ' if present, returning
+    (main_text, annotation) with the second element empty if absent."""
+    marker = f" — {keyword}: "
+    if marker in text:
+        main, _, annotation = text.partition(marker)
+        return main.strip(), annotation.strip()
+    return text.strip(), ""
+
+
+def parse_requirement_lines(section_text: str, annotation_keyword: str) -> list[dict]:
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip().lstrip("-").strip()
+        if not line or line.strip(".").lower() in _PLACEHOLDER_LINES:
+            continue
+        name, _, detail_full = line.partition(":")
+        name = name.strip()
+        priority = "required"  # conservative default if the model omits the tag
+        tag_match = _PRIORITY_PATTERN.match(name)
+        if tag_match:
+            name = tag_match.group(1).strip()
+            priority = tag_match.group(2).lower()
+        detail, annotation = _split_annotation(detail_full.strip(), annotation_keyword)
+        items.append({
+            "requirement": name,
+            "detail": detail.strip('"'),
+            "priority": priority,
+            annotation_keyword: annotation,
+        })
+    return items
+
+
+_HIGHLIGHT_EVIDENCE_MARKER = " — this is your strongest available evidence for "
+
+
+def parse_highlight_lines(section_text: str) -> list[dict]:
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip().lstrip("-").strip()
+        if not line or line.strip(".").lower() in _PLACEHOLDER_LINES:
+            continue
+        name, _, detail_full = line.partition(":")
+        before_suggestion, suggestion = _split_annotation(detail_full.strip(), "suggestion")
+        if _HIGHLIGHT_EVIDENCE_MARKER in before_suggestion:
+            current_mention, _, requirement = before_suggestion.partition(_HIGHLIGHT_EVIDENCE_MARKER)
+        else:
+            current_mention, requirement = before_suggestion, ""
+        items.append({
+            "detail": name.strip(),
+            "current_mention": current_mention.strip().strip('"'),
+            "requirement": requirement.strip(),
+            "suggestion": suggestion,
+        })
+    return items
+
+
+def compute_match_score(matched: list[dict], missing: list[dict]) -> int:
+    """Weighted percentage of requirements satisfied, 1-100. Required items
+    count 3x a nice-to-have, since missing a hard requirement matters far
+    more than missing a nice-to-have. Computed deterministically from the
+    same matched/missing lists match_resume_to_jd already produces, rather
+    than asking the model to invent a number directly — an LLM-generated
+    score would be exactly as run-to-run inconsistent as verdicts have shown
+    themselves to be elsewhere in this project."""
+    REQUIRED_WEIGHT = 3
+    NICE_TO_HAVE_WEIGHT = 1
+
+    def weight(item: dict) -> int:
+        return REQUIRED_WEIGHT if item.get("priority") == "required" else NICE_TO_HAVE_WEIGHT
+
+    matched_weight = sum(weight(i) for i in matched)
+    missing_weight = sum(weight(i) for i in missing)
+    total_weight = matched_weight + missing_weight
+
+    if total_weight == 0:
+        return 100
+
+    score = round((matched_weight / total_weight) * 100)
+    return max(1, min(100, score))
+
+
+def parse_result(raw: str) -> dict:
+    """Parse match_resume_to_jd's raw schema text into a structured dict,
+    including a deterministic 1-100 match score."""
+    verdict_match = re.match(r"VERDICT:\s*(\w+)", raw)
+    verdict = verdict_match.group(1) if verdict_match else "error"
+
+    if verdict == "error":
+        reason_match = re.search(r"REASON:\s*(.+)", raw)
+        return {
+            "verdict": "error",
+            "reason": reason_match.group(1).strip() if reason_match else "Unknown error",
+            "raw": raw,
+        }
+
+    confidence_match = re.search(r"CONFIDENCE:\s*(\w+)", raw)
+    matched = parse_requirement_lines(extract_section(raw, "MATCHED REQUIREMENTS:"), "relevance")
+    missing = parse_requirement_lines(extract_section(raw, "MISSING REQUIREMENTS:"), "importance")
+    highlights = parse_highlight_lines(extract_section(raw, "HIGHLIGHT MORE:"))
+    return {
+        "verdict": verdict,
+        "confidence": confidence_match.group(1) if confidence_match else "low",
+        "score": compute_match_score(matched, missing),
+        "matched": matched,
+        "missing": missing,
+        "highlights": highlights,
+        "raw": raw,
+    }
