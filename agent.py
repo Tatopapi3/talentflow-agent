@@ -1,5 +1,8 @@
 import os
 import re
+from datetime import datetime, timezone
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 from strands import Agent, tool
@@ -118,6 +121,13 @@ def strip_to_verdict(text: str) -> str:
     return text[verdict_idx:] if verdict_idx != -1 else text
 
 
+def parse_verdict(output: str) -> str:
+    """Extract the VERDICT: value (e.g. "advance", "reject", "ambiguous",
+    "error") from raw schema text. Empty string if not present."""
+    match = re.match(r"VERDICT:\s*(\w+)", output)
+    return match.group(1) if match else ""
+
+
 _CALIBRATION_EXCERPT_CHARS = 800
 
 
@@ -201,6 +211,82 @@ def screen_resume(resume_text: str, job_description: str) -> str:
                 return "".join(c.get("text", "") for c in tool_result["content"])
 
     raise RuntimeError("talentflow_agent did not call match_resume_to_jd")
+
+
+CHECKPOINT_LOG_PATH = Path(__file__).parent / "checkpoint_log.txt"
+
+
+def screen_resume_with_checkpoint(
+    resume_text: str, job_description: str, candidate_name: str = "this candidate"
+) -> str:
+    """Runs screen_resume(), then checkpoints before finalizing any REJECT
+    verdict. ADVANCE and AMBIGUOUS pass through with no interruption.
+
+    Why only reject: per the Blast Radius table, "reject" is the one verdict
+    with no downstream human review — once a recruiter reads "reject" and
+    moves on, that candidate typically never gets a second look. "Advance"
+    gets a natural second look at the interview stage, and "ambiguous"
+    already routes to a human by design.
+
+    Built on screen_resume() rather than calling talentflow_agent directly —
+    the agent's own final turn can re-derive a different verdict than the
+    tool actually determined (see screen_resume's docstring), and a
+    checkpoint built on an unreliable source of truth would be worse than no
+    checkpoint at all."""
+    result = screen_resume(resume_text=resume_text, job_description=job_description)
+    verdict = parse_verdict(result)
+
+    if verdict != "reject":
+        return result
+
+    return run_checkpoint(result, candidate_name)
+
+
+def run_checkpoint(result: str, candidate_name: str) -> str:
+    summary = build_checkpoint_summary(result, candidate_name)
+    print(summary)
+
+    while True:
+        answer = input("\nConfirm reject? (yes/no): ").strip().lower()
+        if answer in ("yes", "y"):
+            log_checkpoint_decision(candidate_name, result, confirmed=True)
+            return result
+        elif answer in ("no", "n"):
+            log_checkpoint_decision(candidate_name, result, confirmed=False)
+            return override_to_ambiguous(result)
+        else:
+            print("Please answer 'yes' or 'no'.")
+
+
+def build_checkpoint_summary(result: str, candidate_name: str) -> str:
+    return f"""
+========================================
+CHECKPOINT — Reject verdict for {candidate_name}
+========================================
+TalentFlow is about to recommend REJECTING this candidate.
+This is the one verdict with no downstream human review —
+if confirmed, this candidate will not be re-screened later.
+
+Here is the full evidence behind this call:
+
+{result}
+
+========================================
+"""
+
+
+def log_checkpoint_decision(candidate_name: str, result: str, confirmed: bool) -> None:
+    with open(CHECKPOINT_LOG_PATH, "a") as f:
+        f.write(
+            f"{datetime.now(timezone.utc).isoformat()} | {candidate_name} | "
+            f"confirmed={confirmed}\n{result}\n---\n"
+        )
+
+
+def override_to_ambiguous(result: str) -> str:
+    # "No" downgrades to ambiguous rather than silently discarding the
+    # reject or flipping it to advance.
+    return result.replace("VERDICT: reject", "VERDICT: ambiguous (recruiter overrode reject)", 1)
 
 
 SECTION_HEADERS = ("MATCHED REQUIREMENTS:", "MISSING REQUIREMENTS:", "HIGHLIGHT MORE:")

@@ -63,10 +63,22 @@ The tool is read-only and advisory only — it never writes to an ATS or contact
 | Failure mode | Worst-case impact | Safeguard |
 |---|---|---|
 | Agent infers a skill not actually stated | Qualified candidate marked "missing" on a requirement they do have | System prompt forbids inference; every judgment must cite an exact resume phrase |
-| Recruiter rubber-stamps a "reject" without reading evidence | A real candidate is silently dropped based on a bad model call | Output always includes evidence; "reject" is a recommendation, not an automatic ATS action |
+| Recruiter rubber-stamps a "reject" without reading evidence | A real candidate is silently dropped based on a bad model call | Output always includes evidence; "reject" is a recommendation, not an automatic ATS action. In `demo.py`, a "reject" verdict also can't finalize without an explicit yes/no confirmation — see Human checkpoint below |
 | Resume/JD text is malformed or invalid | Agent could return an invented verdict from garbage input | System prompt requires flagging unreadable input for manual review (`VERDICT: error`) |
 | Prompt injection embedded in resume text | Model manipulated into a false "advance" regardless of qualifications | System prompt explicitly instructs the model to treat resume/JD text as untrusted data, never as instructions |
 | Recruiter's own accept/reject history reflects unconscious bias (age, gender, school, employment gaps, etc.) | The bias gets systematized and amplified rather than caught — the same failure mode that killed Amazon's internal resume-screening AI | Calibration is exact-match, per-JD, and capped at a handful of literal past decisions (not a learned/summarized profile) so a human can always see exactly what was surfaced; the prompt explicitly instructs the model to discard any past decision that looks bias-driven rather than qualification-driven — see Recruiter Calibration below |
+
+## Human checkpoint before reject
+
+`reject` is the one verdict with no natural downstream review — `advance` gets a second look at the interview stage, `ambiguous` already routes to a human by design, but a `reject` a recruiter reads and moves past typically never gets revisited. `screen_resume_with_checkpoint()` in `agent.py` (used by `demo.py`) pauses on any `reject` verdict and requires an explicit `yes`/`no` before it's treated as final:
+
+- **yes** — confirms the reject, logs the decision (candidate name, full evidence, timestamp) to `checkpoint_log.txt` (gitignored — holds real candidate data), and returns the verdict unchanged.
+- **no** — logs the override and downgrades the verdict to `VERDICT: ambiguous (recruiter overrode reject)` rather than silently discarding the reject or flipping it to `advance` — the override itself becomes part of the audit trail.
+- `advance` and `ambiguous` pass straight through, no interruption.
+
+Built on `screen_resume()` rather than calling `talentflow_agent` directly — the agent's own final turn can re-derive a different verdict than the tool actually determined (see `screen_resume`'s docstring above), and a checkpoint built on an unreliable source of truth would be worse than no checkpoint at all.
+
+**CLI-only, deliberately**: the checkpoint blocks on a real `input()` call, which only makes sense in `demo.py`'s interactive terminal loop. `server.py`'s web UI still uses plain `screen_resume()` — a blocking terminal prompt inside a Flask request would just hang the server, since no browser can answer it. Bringing an equivalent confirm-before-reject step to the web app would need a genuinely different mechanism (e.g. a pending-confirmation state surfaced back to the page), not this same function.
 
 ## Recruiter calibration (feedback loop)
 
