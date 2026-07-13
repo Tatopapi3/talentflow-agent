@@ -339,13 +339,21 @@ def _cast_vote(resume_text: str, job_description: str) -> dict:
     }
 
 
-async def vote_on_resume(resume_text: str, job_description: str, n_votes: int = 3) -> list[dict]:
+async def vote_on_resume(resume_text: str, job_description: str, n_votes: int = 2) -> list[dict]:
     """Run the screening n_votes times in parallel and return each vote's
     raw result plus its latency/token/cost figures. The underlying Agent
     call is synchronous (not native asyncio), so this uses a thread pool
-    rather than true concurrent I/O — the 3 calls still overlap instead of
+    rather than true concurrent I/O — the votes still overlap instead of
     running one after another, so wall-clock latency stays roughly flat
-    instead of tripling."""
+    instead of scaling with n_votes.
+
+    Default is 2, not 3: tested against 33 independent 3-vote screenings
+    (99 votes total — repeated borderline-case runs, a temperature=0.3
+    diagnostic, and an 18-resume batch of strong/weak/borderline matches),
+    0 produced any disagreement. The 3rd vote's measured reliability
+    benefit was zero in every trial, at a 50% cost premium over 2 — see
+    the README's Open Questions section for the full data. Revisit if
+    vote_log.txt starts showing real splits across broader real-world use."""
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=n_votes) as executor:
         tasks = [
@@ -356,9 +364,9 @@ async def vote_on_resume(resume_text: str, job_description: str, n_votes: int = 
 
 
 def log_vote_metrics(candidate_name: str, votes: list[dict]) -> None:
-    """Log real cost/latency/token figures per screening — voting triples
-    API spend per resume, so tuning n_votes later (e.g. down to 2) should be
-    based on measured numbers, not a guess."""
+    """Log real cost/latency/token figures per screening — voting multiplies
+    API spend per resume by n_votes, so further tuning that number should
+    keep being based on measured numbers, not a guess."""
     total_cost = sum(v["cost_usd"] for v in votes)
     total_tokens = sum(v["input_tokens"] + v["output_tokens"] for v in votes)
     wall_clock = max(v["elapsed_seconds"] for v in votes)  # votes run in parallel, not summed
@@ -419,7 +427,7 @@ def build_ambiguous_from_split(results: list[str], verdicts: list[str]) -> str:
 
 
 def screen_resume_with_voting(
-    resume_text: str, job_description: str, candidate_name: str = "this candidate", n_votes: int = 3
+    resume_text: str, job_description: str, candidate_name: str = "this candidate", n_votes: int = 2
 ) -> str:
     """Runs match_resume_to_jd n_votes times in parallel and aggregates them
     (vote_on_resume / aggregate_votes), then checkpoints on the aggregated
