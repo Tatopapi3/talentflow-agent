@@ -75,7 +75,11 @@ RELEVANCE
 For every entry under MATCHED REQUIREMENTS, follow the quoted evidence with " — relevance: " and one brief clause explaining why that evidence matters for this specific role (not a generic statement about the skill in general).
 
 HIGHLIGHTS
-After classifying matched and missing requirements, separately identify up to 3 additional details already present in the resume that are relevant to this job but under-emphasized, vague, or easy for a recruiter to skim past. For each, quote the resume's current phrasing and suggest one concrete, specific way to reframe or expand it to better demonstrate fit for this role. Never invent achievements, numbers, or scope not already in the resume — only suggest better framing of what is genuinely there. If nothing meaningfully under-emphasized exists, leave this section with just the header and no items.
+After classifying matched and missing requirements, separately identify up to 3 additional details already present in the resume that could serve as evidence for a requirement you just listed under MISSING REQUIREMENTS, or that would meaningfully strengthen a requirement already under MATCHED REQUIREMENTS. This section is held to the same evidence-citation standard as the rest of the schema — never a standalone, generic resume-coaching tip. Every item must:
+- Quote the resume's current phrasing of the detail.
+- Name the exact requirement it would help address, using the identical requirement name already used under MATCHED or MISSING REQUIREMENTS above — never inventing a new category name.
+- Suggest one concrete, specific way to reframe or expand that detail, and explain why doing so would close or strengthen that specific gap (not just "look better").
+Never invent achievements, numbers, or scope not already in the resume — only suggest better framing of what is genuinely there. Do not force a connection that does not exist: if no resume content could plausibly be expanded to address a given missing requirement, do not manufacture a suggestion for it — either omit that item entirely, or state so explicitly (e.g. "No resume content found that could be expanded to address requirement-name") rather than offering advice that would not actually help. If nothing meaningfully expandable exists at all, leave this section with just the header and no items.
 
 EMPTY SECTIONS
 If every requirement is matched, write the MISSING REQUIREMENTS header with nothing after it — no placeholder line, and never write "none," "n/a," "-," or any other filler as if it were a requirement. The same applies to MATCHED REQUIREMENTS in the rare case nothing at all is matched, and to HIGHLIGHT MORE when there is nothing worth surfacing. A section with no items is simply the header followed by the next section (or the end of the schema).
@@ -90,7 +94,7 @@ MATCHED REQUIREMENTS:
 MISSING REQUIREMENTS:
 - requirement-name (required | nice-to-have): no evidence found in resume — importance: why this gap matters for this role
 HIGHLIGHT MORE:
-- resume-detail-name: "current resume phrasing" — suggestion: concrete way to reframe or expand it
+- resume-detail-name: "current resume phrasing" — this is your strongest available evidence for requirement-name (currently matched | currently missing) — suggestion: concrete way to reframe or expand it that would close or strengthen that specific gap
 
 If the resume or job description text is empty, unreadable, or clearly not a resume/JD, output only:
 
@@ -347,6 +351,9 @@ def parse_requirement_lines(section_text: str, annotation_keyword: str) -> list[
     return items
 
 
+_HIGHLIGHT_EVIDENCE_MARKER = " — this is your strongest available evidence for "
+
+
 def parse_highlight_lines(section_text: str) -> list[dict]:
     items = []
     for line in section_text.splitlines():
@@ -354,10 +361,15 @@ def parse_highlight_lines(section_text: str) -> list[dict]:
         if not line or line.strip(".").lower() in _PLACEHOLDER_LINES:
             continue
         name, _, detail_full = line.partition(":")
-        current_mention, suggestion = _split_annotation(detail_full.strip(), "suggestion")
+        before_suggestion, suggestion = _split_annotation(detail_full.strip(), "suggestion")
+        if _HIGHLIGHT_EVIDENCE_MARKER in before_suggestion:
+            current_mention, _, requirement = before_suggestion.partition(_HIGHLIGHT_EVIDENCE_MARKER)
+        else:
+            current_mention, requirement = before_suggestion, ""
         items.append({
             "detail": name.strip(),
-            "current_mention": current_mention.strip('"'),
+            "current_mention": current_mention.strip().strip('"'),
+            "requirement": requirement.strip(),
             "suggestion": suggestion,
         })
     return items

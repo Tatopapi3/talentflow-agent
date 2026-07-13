@@ -121,6 +121,7 @@ function renderResultCard(result) {
           <li>
             <span class="req-name">${escapeHtml(item.detail)}</span>
             ${item.current_mention ? `<span class="req-detail">"${escapeHtml(item.current_mention)}"</span>` : ""}
+            ${item.requirement ? `<span class="req-annotation">Addresses: ${escapeHtml(item.requirement)}</span>` : ""}
             ${item.suggestion ? `<span class="req-annotation">${escapeHtml(item.suggestion)}</span>` : ""}
           </li>
         `).join("")

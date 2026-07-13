@@ -232,6 +232,37 @@ def test_checkpoint() -> list[str]:
     return failures
 
 
+def test_highlight_more_accountability() -> list[str]:
+    """Every HIGHLIGHT MORE item must reference a real requirement name from
+    this same output's MATCHED or MISSING REQUIREMENTS list — not a
+    standalone, generic resume-coaching tip. Runs live against the cases
+    that reliably produce reject/advance verdicts with non-empty (or
+    explicitly-empty) HIGHLIGHT MORE sections, rather than mocking, since
+    this is exactly the behavior the prompt change is meant to enforce."""
+    failures = []
+    for name in [
+        "2 - Golden (edge case, terminology mismatch)",
+        "4 - Adversarial (prompt injection)",
+        "5 - Adversarial (adjacent-role evidence trap)",
+        "6 - Adversarial (duration threshold trap)",
+    ]:
+        case = CASES[name]
+        output = match_resume_to_jd(resume_text=case["resume"], job_description=case["jd"])
+        parsed = parse_result(output)
+        requirement_names = [
+            item["requirement"].lower()
+            for item in parsed.get("matched", []) + parsed.get("missing", [])
+            if item.get("requirement")
+        ]
+        for item in parsed.get("highlights", []):
+            haystack = f"{item.get('detail', '')} {item.get('requirement', '')}".lower()
+            if not any(req in haystack for req in requirement_names):
+                failures.append(
+                    f"{name}: HIGHLIGHT MORE item does not reference a real requirement name: {item}"
+                )
+    return failures
+
+
 if __name__ == "__main__":
     any_failed = False
     for name, case in CASES.items():
@@ -256,6 +287,19 @@ if __name__ == "__main__":
         any_failed = True
         print(f"FAIL ({len(checkpoint_failures)} issue(s)):")
         for f in checkpoint_failures:
+            print(f"  - {f}")
+    else:
+        print("PASS")
+    print()
+
+    print("=" * 80)
+    print("8 - Highlight More accountability")
+    print("=" * 80)
+    highlight_failures = test_highlight_more_accountability()
+    if highlight_failures:
+        any_failed = True
+        print(f"FAIL ({len(highlight_failures)} issue(s)):")
+        for f in highlight_failures:
             print(f"  - {f}")
     else:
         print("PASS")
