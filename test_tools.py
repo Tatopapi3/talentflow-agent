@@ -352,6 +352,90 @@ def test_vote_aggregation() -> list[str]:
     return failures
 
 
+# Regression fixture for a real bug: a sparse, vague resume (real job
+# titles/tenure, but no concrete technical detail — "backend services",
+# "internal APIs", "data storage systems" instead of naming any actual
+# technology) produced VERDICT: ambiguous (split vote), CONFIDENCE: low —
+# genuine uncertainty, not a confirmed mismatch — but SCORE still came back
+# 1/100, indistinguishable from a resume with clear, confirmed disqualifying
+# evidence. A recruiter skimming just the number would never know the
+# difference. Captured verbatim from a real split-vote reproduction (one
+# live "reject" run paired with one live "ambiguous" run on this exact
+# resume/JD, fed through the real build_ambiguous_from_split) rather than
+# hand-written, so this is a real case, not a synthetic one. Canned rather
+# than re-run live here, since which verdict a temperature=1 model lands on
+# is inherently non-deterministic — this test is about compute_match_score's
+# behavior given an ambiguous/low-confidence input, not about reproducing
+# the non-determinism itself (already confirmed live separately).
+JORDAN_REYES_RESUME = """Jordan Reyes
+Software Engineer, TechCorp (2019-2024)
+- Built and maintained backend services supporting the company's core product across multiple regions
+- Developed internal tooling and automation scripts to support engineering workflows
+- Worked on internal APIs consumed by other teams
+- Maintained data storage systems supporting production traffic
+Software Engineer, StartupCo (2017-2019)
+- Supported backend infrastructure for the company's main application
+- Contributed to internal data systems and tooling
+"""
+
+JORDAN_REYES_AMBIGUOUS_LOW_RESULT = (
+    'VERDICT: ambiguous (split vote — vote 1: reject, vote 2: ambiguous)\nCONFIDENCE: low\n'
+    'MATCHED REQUIREMENTS:\nMISSING REQUIREMENTS:\n'
+    '- 5+ years building distributed systems in production (required): requirement uses different '
+    'terminology than resume — resume says "Built and maintained backend services supporting the '
+    'company\'s core product across multiple regions", unclear if equivalent\n'
+    '- Strong proficiency in Python (required): no evidence found in resume — importance: Python is '
+    'explicitly named as a required language for this role, and no programming language is mentioned '
+    'anywhere in the resume\n'
+    '- Experience designing and operating REST APIs (required): requirement uses different terminology '
+    'than resume — resume says "Worked on internal APIs consumed by other teams", unclear if equivalent\n'
+    '- Experience with PostgreSQL or another relational database (required): requirement uses different '
+    'terminology than resume — resume says "Maintained data storage systems supporting production '
+    'traffic", unclear if equivalent\n'
+    '- Experience with Kubernetes (nice-to-have): no evidence found in resume\n'
+    '- Experience mentoring junior engineers (nice-to-have): no evidence found in resume\n'
+    'HIGHLIGHT MORE:\n'
+)
+
+
+def test_ambiguous_low_confidence_score_band() -> list[str]:
+    """Regression test for the SCORE/VERDICT inconsistency above: when a
+    result is VERDICT: ambiguous with CONFIDENCE: low (genuine uncertainty),
+    the score must land in a mid-range band, not down at the same extreme a
+    confirmed mismatch (VERDICT: reject, CONFIDENCE: high) would produce."""
+    failures = []
+    parsed = parse_result(JORDAN_REYES_AMBIGUOUS_LOW_RESULT)
+
+    if parsed["verdict"] != "ambiguous" or parsed["confidence"] != "low":
+        failures.append(
+            f"fixture itself isn't ambiguous/low (got verdict={parsed['verdict']!r}, "
+            f"confidence={parsed['confidence']!r}) — test fixture is broken"
+        )
+
+    score = parsed["score"]
+    if not (25 <= score <= 60):
+        failures.append(
+            f"ambiguous/low-confidence result scored {score}/100, expected it to land in the "
+            "25-60 mid-range band reflecting genuine uncertainty, not a confirmed low-fit score"
+        )
+
+    # A confirmed mismatch (reject/high) with the same near-all-missing
+    # shape must still be free to score at the very low end — this isn't
+    # asserting "nothing can score low," just that ambiguous/low specifically
+    # gets rescaled while reject/high does not.
+    confirmed_mismatch = JORDAN_REYES_AMBIGUOUS_LOW_RESULT.replace(
+        "VERDICT: ambiguous (split vote — vote 1: reject, vote 2: ambiguous)", "VERDICT: reject", 1
+    ).replace("CONFIDENCE: low", "CONFIDENCE: high", 1)
+    confirmed_score = parse_result(confirmed_mismatch)["score"]
+    if confirmed_score >= 25:
+        failures.append(
+            f"reject/high-confidence result scored {confirmed_score}/100, expected it to stay well "
+            "below the ambiguous band since this is a confirmed mismatch, not genuine uncertainty"
+        )
+
+    return failures
+
+
 if __name__ == "__main__":
     any_failed = False
     for name, case in CASES.items():
@@ -402,6 +486,19 @@ if __name__ == "__main__":
         any_failed = True
         print(f"FAIL ({len(vote_failures)} issue(s)):")
         for f in vote_failures:
+            print(f"  - {f}")
+    else:
+        print("PASS")
+    print()
+
+    print("=" * 80)
+    print("10 - Ambiguous/low-confidence score band")
+    print("=" * 80)
+    score_band_failures = test_ambiguous_low_confidence_score_band()
+    if score_band_failures:
+        any_failed = True
+        print(f"FAIL ({len(score_band_failures)} issue(s)):")
+        for f in score_band_failures:
             print(f"  - {f}")
     else:
         print("PASS")
