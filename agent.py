@@ -118,12 +118,19 @@ def _get_model() -> LiteLLMModel:
     # fixed low temperature for determinism; this one genuinely doesn't, so
     # temperature is omitted here rather than pinned to a value the API
     # would reject.
+    #
+    # max_tokens is 16384, not 4096: claude-sonnet-5 does its own internal
+    # reasoning out of the same output-token budget as the final schema
+    # text, which gpt-4o never did — 4096 was enough for gpt-4o's direct
+    # answer but hit MaxTokensReachedException on claude-sonnet-5 for a
+    # real, moderately long resume (reasoning ate the budget before the
+    # schema block was written).
     return LiteLLMModel(
         client_args={
             "api_key": os.environ["ANTHROPIC_API_KEY"],
         },
         model_id=_MODEL_ID,
-        params={"max_tokens": 4096},
+        params={"max_tokens": 16384},
     )
 
 
@@ -540,14 +547,28 @@ def parse_highlight_lines(section_text: str) -> list[dict]:
     return items
 
 
-def compute_match_score(matched: list[dict], missing: list[dict]) -> int:
+_AMBIGUOUS_SCORE_BAND = (30, 55)
+
+
+def compute_match_score(matched: list[dict], missing: list[dict], verdict: str, confidence: str) -> int:
     """Weighted percentage of requirements satisfied, 1-100. Required items
     count 3x a nice-to-have, since missing a hard requirement matters far
     more than missing a nice-to-have. Computed deterministically from the
     same matched/missing lists match_resume_to_jd already produces, rather
     than asking the model to invent a number directly — an LLM-generated
     score would be exactly as run-to-run inconsistent as verdicts have shown
-    themselves to be elsewhere in this project."""
+    themselves to be elsewhere in this project.
+
+    verdict/confidence exist as inputs specifically to prevent a real
+    inconsistency: a sparse, vague resume with no confirmed disqualifying
+    evidence (VERDICT: ambiguous, CONFIDENCE: low — genuine uncertainty)
+    was scoring as low as a resume the model is confident is a real
+    mismatch, because the raw weighted match count looks the same either
+    way (usually near-zero matched, everything missing). The score is the
+    first thing a recruiter sees; a low number reads as "don't bother,"
+    which is the wrong signal for "look closer, this is unclear" — very
+    low scores should be reserved for cases the model is actually
+    confident about."""
     REQUIRED_WEIGHT = 3
     NICE_TO_HAVE_WEIGHT = 1
 
@@ -561,8 +582,14 @@ def compute_match_score(matched: list[dict], missing: list[dict]) -> int:
     if total_weight == 0:
         return 100
 
-    score = round((matched_weight / total_weight) * 100)
-    return max(1, min(100, score))
+    raw_score = round((matched_weight / total_weight) * 100)
+    raw_score = max(1, min(100, raw_score))
+
+    if verdict == "ambiguous" and confidence == "low":
+        low, high = _AMBIGUOUS_SCORE_BAND
+        return round(low + (raw_score / 100) * (high - low))
+
+    return raw_score
 
 
 def parse_result(raw: str) -> dict:
@@ -580,13 +607,14 @@ def parse_result(raw: str) -> dict:
         }
 
     confidence_match = re.search(r"CONFIDENCE:\s*(\w+)", raw)
+    confidence = confidence_match.group(1) if confidence_match else "low"
     matched = parse_requirement_lines(extract_section(raw, "MATCHED REQUIREMENTS:"), "relevance")
     missing = parse_requirement_lines(extract_section(raw, "MISSING REQUIREMENTS:"), "importance")
     highlights = parse_highlight_lines(extract_section(raw, "HIGHLIGHT MORE:"))
     return {
         "verdict": verdict,
-        "confidence": confidence_match.group(1) if confidence_match else "low",
-        "score": compute_match_score(matched, missing),
+        "confidence": confidence,
+        "score": compute_match_score(matched, missing, verdict, confidence),
         "matched": matched,
         "missing": missing,
         "highlights": highlights,
