@@ -118,12 +118,19 @@ def _get_model() -> LiteLLMModel:
     # fixed low temperature for determinism; this one genuinely doesn't, so
     # temperature is omitted here rather than pinned to a value the API
     # would reject.
+    #
+    # max_tokens is 16384, not 4096: claude-sonnet-5 does its own internal
+    # reasoning out of the same output-token budget as the final schema
+    # text, which gpt-4o never did — 4096 was enough for gpt-4o's direct
+    # answer but hit MaxTokensReachedException on claude-sonnet-5 for a
+    # real, moderately long resume (reasoning ate the budget before the
+    # schema block was written).
     return LiteLLMModel(
         client_args={
             "api_key": os.environ["ANTHROPIC_API_KEY"],
         },
         model_id=_MODEL_ID,
-        params={"max_tokens": 4096},
+        params={"max_tokens": 16384},
     )
 
 
