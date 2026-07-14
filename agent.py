@@ -3,7 +3,6 @@ import os
 import re
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -90,7 +89,7 @@ EMPTY SECTIONS
 If every requirement is matched, write the MISSING REQUIREMENTS header with nothing after it — no placeholder line, and never write "none," "n/a," "-," or any other filler as if it were a requirement. The same applies to MATCHED REQUIREMENTS in the rare case nothing at all is matched, and to HIGHLIGHT MORE when there is nothing worth surfacing. A section with no items is simply the header followed by the next section (or the end of the schema).
 
 OUTPUT SCHEMA
-Respond with ONLY the schema block below. Your response must start with "VERDICT:" as the very first characters — no reasoning, analysis, or preamble before it, and no commentary after it. Replace requirement-name and evidence-phrase with actual text; do not include literal square brackets or angle brackets in your output.
+Respond with ONLY the schema block below. Your response must start with "VERDICT:" as the very first characters — no reasoning, analysis, or preamble before it, and no commentary after it. Every hyphenated placeholder shown below (requirement-name, evidence-phrase, resume-detail-name, etc.) must be replaced with actual text describing this specific resume/job description — never output a placeholder token itself verbatim; do not include literal square brackets or angle brackets in your output.
 
 VERDICT: advance | reject | ambiguous
 CONFIDENCE: high | low
@@ -110,14 +109,13 @@ TERMINATION CONDITION
 Produce exactly one verdict per resume and stop. Do not re-evaluate or ask clarifying questions. Once the output schema above has been returned, your turn is complete."""
 
 
-_MODEL_ID = "openrouter/openai/gpt-4o"
+_MODEL_ID = "claude-sonnet-4-6"
 
 
 def _get_model() -> LiteLLMModel:
     return LiteLLMModel(
         client_args={
-            "api_base": "https://openrouter.ai/api/v1",
-            "api_key": os.environ["OPENROUTER_API_KEY"],
+            "api_key": os.environ["ANTHROPIC_API_KEY"],
         },
         model_id=_MODEL_ID,
         params={"max_tokens": 4096, "temperature": 0},
@@ -181,17 +179,35 @@ def _build_calibration_block(job_description: str) -> str:
     return "\n".join(lines)
 
 
+def _build_screener_and_prompt(resume_text: str, job_description: str):
+    """Shared setup behind both _run_screening and _run_screening_async —
+    same Agent/prompt construction either way, just called sync or async."""
+    screener = Agent(model=_get_model(), system_prompt=_SCREENING_PROMPT, callback_handler=None)
+    calibration_block = _build_calibration_block(job_description)
+    prompt = f"{calibration_block}JOB DESCRIPTION:\n{job_description}\n\nRESUME:\n{resume_text}"
+    return screener, prompt
+
+
 def _run_screening(resume_text: str, job_description: str):
     """Shared implementation behind match_resume_to_jd. Returns the raw
     AgentResult (not just its text) so callers that also need token usage
-    for cost tracking (the voting orchestration below) don't have to
-    duplicate this call — match_resume_to_jd itself is untouched, just a
-    thin wrapper over this."""
-    screener = Agent(model=_get_model(), system_prompt=_SCREENING_PROMPT, callback_handler=None)
-    calibration_block = _build_calibration_block(job_description)
-    return screener(
-        f"{calibration_block}JOB DESCRIPTION:\n{job_description}\n\nRESUME:\n{resume_text}"
-    )
+    for cost tracking don't have to duplicate this call — match_resume_to_jd
+    itself is untouched, just a thin wrapper over this."""
+    screener, prompt = _build_screener_and_prompt(resume_text, job_description)
+    return screener(prompt)
+
+
+async def _run_screening_async(resume_text: str, job_description: str):
+    """Async counterpart used by the voting orchestration below (vote_on_resume),
+    via Agent.invoke_async — not a thread-pooled wrapper over the sync call.
+    Running each vote's Agent.__call__ in its own thread (each spinning up
+    its own asyncio.run) hit a real bug: litellm's Anthropic provider uses
+    an aiohttp transport that isn't safe across multiple concurrently-running
+    event loops in different threads ("Task attached to a different loop").
+    Calling invoke_async directly keeps every vote on the same event loop,
+    avoiding that class of bug entirely."""
+    screener, prompt = _build_screener_and_prompt(resume_text, job_description)
+    return await screener.invoke_async(prompt)
 
 
 @tool
@@ -323,11 +339,11 @@ def _estimate_cost_usd(usage: dict) -> float:
     return usage.get("inputTokens", 0) * input_cost + usage.get("outputTokens", 0) * output_cost
 
 
-def _cast_vote(resume_text: str, job_description: str) -> dict:
+async def _cast_vote(resume_text: str, job_description: str) -> dict:
     """One vote: run the screening once, timed, with real token/cost figures
-    attached — this is what runs in each thread pool worker."""
+    attached."""
     start = time.monotonic()
-    response = _run_screening(resume_text, job_description)
+    response = await _run_screening_async(resume_text, job_description)
     elapsed = time.monotonic() - start
     usage = response.metrics.accumulated_usage
     return {
@@ -340,12 +356,11 @@ def _cast_vote(resume_text: str, job_description: str) -> dict:
 
 
 async def vote_on_resume(resume_text: str, job_description: str, n_votes: int = 2) -> list[dict]:
-    """Run the screening n_votes times in parallel and return each vote's
-    raw result plus its latency/token/cost figures. The underlying Agent
-    call is synchronous (not native asyncio), so this uses a thread pool
-    rather than true concurrent I/O — the votes still overlap instead of
-    running one after another, so wall-clock latency stays roughly flat
-    instead of scaling with n_votes.
+    """Run the screening n_votes times in parallel (via Agent.invoke_async,
+    all on the same event loop — see _run_screening_async) and return each
+    vote's raw result plus its latency/token/cost figures. Wall-clock
+    latency stays roughly flat instead of scaling with n_votes, since the
+    calls genuinely overlap rather than running one after another.
 
     Default is 2, not 3: tested against 33 independent 3-vote screenings
     (99 votes total — repeated borderline-case runs, a temperature=0.3
@@ -354,13 +369,8 @@ async def vote_on_resume(resume_text: str, job_description: str, n_votes: int = 
     benefit was zero in every trial, at a 50% cost premium over 2 — see
     the README's Open Questions section for the full data. Revisit if
     vote_log.txt starts showing real splits across broader real-world use."""
-    loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor(max_workers=n_votes) as executor:
-        tasks = [
-            loop.run_in_executor(executor, _cast_vote, resume_text, job_description)
-            for _ in range(n_votes)
-        ]
-        return await asyncio.gather(*tasks)
+    tasks = [_cast_vote(resume_text, job_description) for _ in range(n_votes)]
+    return await asyncio.gather(*tasks)
 
 
 def log_vote_metrics(candidate_name: str, votes: list[dict]) -> None:

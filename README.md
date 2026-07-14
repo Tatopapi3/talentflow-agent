@@ -8,7 +8,7 @@ Recruiters spend ~23 hours per hire manually screening 50–200+ resumes, and at
 
 ## How it works
 
-`match_resume_to_jd(resume_text, job_description)` sends both texts to an LLM (via `LiteLLMModel`/OpenRouter) with a system prompt that:
+`match_resume_to_jd(resume_text, job_description)` sends both texts to an LLM (via `LiteLLMModel`, currently Claude Sonnet 4.6 directly through the Anthropic API — see Known limitations for the model history) with a system prompt that:
 
 - Requires citing the exact resume phrase behind every matched/missing requirement (no inferred skills)
 - Tags every requirement `(required)` or `(nice-to-have)` per the job description's own framing, and appends a brief relevance/importance clause to each
@@ -28,11 +28,13 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Add your OpenRouter key to `.env`:
+Add your Anthropic API key to `.env`:
 
 ```
-OPENROUTER_API_KEY=sk-or-...
+ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+(`OPENROUTER_API_KEY` was used before the switch to Claude directly — see Known limitations — and is no longer read by any code path, but is harmless to leave in `.env` if present.)
 
 ## Usage
 
@@ -91,7 +93,7 @@ The tool is read-only and advisory only — it never writes to an ATS or contact
 
 `build_ambiguous_from_split()` keeps MATCHED/MISSING/HIGHLIGHT MORE (and the score computed from them) from one representative run — whichever verdict a majority of votes share, or run 1 if all three disagreed — so the aggregated result stays exactly as parseable as a single-run one; nothing downstream (score, the checkpoint, `parse_result`) had to change to handle it. The full text of all 3 runs is printed straight to the terminal rather than spliced into the returned string — each run's raw text contains the same section headers `extract_section` searches for, so embedding them risks silently truncating the representative run's own sections.
 
-**Concurrency**: `match_resume_to_jd`'s underlying `Agent` call is synchronous, not native `asyncio`, so `vote_on_resume()` fires the 3 calls via a thread pool (`loop.run_in_executor`) rather than true async I/O — wall-clock latency still stays roughly flat instead of tripling, since the calls overlap. `match_resume_to_jd` itself is untouched; a new `_run_screening()` helper holds the shared call so both it and the per-vote worker (which also needs token usage for cost tracking) can reuse the same code path.
+**Concurrency**: `vote_on_resume()` fires all votes on one event loop via `asyncio.gather`, using `Agent.invoke_async` directly (`_run_screening_async` in `agent.py`) — true async I/O, not a thread pool. (An earlier version used a thread pool over `match_resume_to_jd`'s synchronous call, since it wasn't obviously async-compatible; that broke under Claude's Anthropic-provider transport, which isn't safe across multiple threads each running their own event loop — see Known limitations.) `match_resume_to_jd` itself is untouched; `_run_screening`/`_run_screening_async` share the same Agent/prompt construction (`_build_screener_and_prompt`) so match_resume_to_jd's sync path and voting's async path never duplicate that logic.
 
 **Cost/latency logging**: voting triples API spend per resume, so `log_vote_metrics()` appends real per-screening numbers — token counts, an estimated dollar cost (from `litellm`'s maintained per-model pricing table, not a hardcoded rate), and wall-clock latency — to `vote_log.txt` (gitignored) from day one, so `n_votes` can be tuned later from measured data instead of a guess.
 
@@ -125,7 +127,11 @@ Beyond the base spec (cite evidence, never infer, treat resume/JD text as untrus
 
 ## Known limitations
 
-- **Model choice**: started on the free OpenRouter tier, which showed real non-determinism (flipping `advance`/`reject`/`error` across identical runs) and rate-limited (429) under back-to-back calls. Moved to `openrouter/openai/gpt-4o-mini` at `temperature=0`, which passed the synthetic eval suite reliably but still occasionally mismatched evidence on longer, multi-section real-world job descriptions (e.g. crediting a 600-hour bootcamp program as satisfying a "3+ years professional experience" requirement). Moved again to `openrouter/openai/gpt-4o`, which resolved that gap in testing against both the synthetic suite and a real resume/JD pair. `gpt-4o` costs meaningfully more per call than `gpt-4o-mini` — factor that in before high-volume use.
+- **Model choice**: started on the free OpenRouter tier, which showed real non-determinism (flipping `advance`/`reject`/`error` across identical runs) and rate-limited (429) under back-to-back calls. Moved to `openrouter/openai/gpt-4o-mini` at `temperature=0`, which passed the synthetic eval suite reliably but still occasionally mismatched evidence on longer, multi-section real-world job descriptions (e.g. crediting a 600-hour bootcamp program as satisfying a "3+ years professional experience" requirement). Moved again to `openrouter/openai/gpt-4o`, which resolved that gap in testing against both the synthetic suite and a real resume/JD pair.
+- **Switched to Claude, direct Anthropic API (2026-07-13)**: moved off OpenRouter/`gpt-4o` to Claude, called directly via `LiteLLMModel` with `ANTHROPIC_API_KEY` (no `api_base` override needed — litellm routes bare `claude-*` model IDs to Anthropic directly). Three things surfaced during the switch, in case they recur with a future model change:
+  - **Claude Sonnet 5 (`claude-sonnet-5`) rejects `temperature=0` outright** ("Only temperature=1 is supported") — a real API-level incompatibility with this project's determinism design (every reliability argument here, including whether voting's disagreement rate is meaningful, assumes `temperature=0` single-run stability). Used **Claude Sonnet 4.6 (`claude-sonnet-4-6`)** instead, which supports `temperature=0` normally; `_MODEL_ID` in `agent.py` is the single place this is configured.
+  - **HIGHLIGHT MORE placeholder echo**: Claude Sonnet 4.6 intermittently output the literal schema placeholder `resume-detail-name:` instead of substituting an actual descriptive name, something `gpt-4o` never did. Root cause: the OUTPUT SCHEMA instruction explicitly named only `requirement-name` and `evidence-phrase` as placeholders to replace, omitting `resume-detail-name` — `gpt-4o` generalized past that gap, Claude took it more literally. Fixed by broadening the instruction to cover every hyphenated placeholder in the schema, not an enumerated list.
+  - **Voting's thread-pool concurrency broke on Anthropic's transport**: `vote_on_resume` originally ran each vote's synchronous `Agent.__call__` in its own thread (via `ThreadPoolExecutor`), since `match_resume_to_jd` wasn't natively async. That silently relied on each thread's own nested `asyncio.run()`, which is exactly what broke — litellm's Anthropic provider uses an `aiohttp` transport that isn't safe when multiple threads each run their own concurrent event loop ("Task ... attached to a different loop"). This worked fine under OpenRouter/`gpt-4o`'s transport but not Anthropic's directly. Fixed properly rather than papered over: `vote_on_resume` now calls `Agent.invoke_async` natively (via a new `_run_screening_async` alongside the existing sync `_run_screening`) and runs all votes on one event loop via `asyncio.gather` — no threads, no nested loops, and closer to the original async design intent than the thread-pool workaround was.
 - **Terminology-mismatch judgment calls**: the "different terminology" eval case ("led backend services" vs. "distributed systems") deterministically resolves to `advance`, not `ambiguous`, given this resume's full context (8 years, explicitly multi-region, plus clean evidence for every other requirement). That's a defensible read of a genuinely borderline case, not a bug — a human recruiter could reasonably call it either way.
 - **Chain-of-thought leakage**: regardless of model, the underlying completion can still narrate its reasoning before the schema block despite explicit instruction not to. `match_resume_to_jd` handles this in code by truncating its return value to start at the first `VERDICT:` occurrence, so the output contract holds even when the model doesn't fully comply.
 - **No guarantee against all evidence-matching errors**: this is LLM judgment, not a deterministic rules engine. The rules above meaningfully reduce (and in regression tests, eliminate) specific known failure modes, but a recruiter should still spot-check `reject` verdicts before acting on them, per the Blast Radius table above.
