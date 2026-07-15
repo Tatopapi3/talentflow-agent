@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from agent import (
+    _build_screener_and_prompt,
     aggregate_votes,
     extract_section,
     match_resume_to_jd,
@@ -13,6 +14,7 @@ from agent import (
     parse_result,
     parse_verdict,
     screen_resume_with_checkpoint,
+    strip_to_verdict,
     talentflow_agent,
 )
 
@@ -532,6 +534,53 @@ def test_talentflow_agent_relays_tool_result_verbatim() -> list[str]:
     return failures
 
 
+def test_per_vote_relay_fidelity() -> list[str]:
+    """Regression test locking in per-vote relay fidelity in the voting
+    layer, following the same methodology used to catch talentflow_agent's
+    top-level relay bug (see quick_trace_voting.py for the full live trace
+    this was derived from).
+
+    Two checks, one deterministic and one live:
+    (1) Structural: _run_screening_async's screener Agent (built by
+        _build_screener_and_prompt, the same helper both the sync and async
+        screening paths share) must have zero tools registered. This is
+        what guarantees there's no toolUse/toolResult relay step for a
+        vote's result to diverge at in the first place — if a future
+        change ever adds tools= here, this check fails immediately,
+        without needing a live call to notice.
+    (2) Live: strip_to_verdict() — the one transformation every vote's raw
+        completion goes through before aggregate_votes() trusts it — must
+        not alter anything beyond truncating a preamble before the first
+        'VERDICT:'. Verified against a real completion rather than a canned
+        string, since this is specifically checking real model output
+        doesn't trip strip_to_verdict() in some unexpected way."""
+    failures = []
+
+    screener, _ = _build_screener_and_prompt(
+        CASES["1 - Golden (normal)"]["resume"], CASES["1 - Golden (normal)"]["jd"]
+    )
+    if screener.tool_names != []:
+        failures.append(
+            f"_run_screening_async's screener has tools registered ({screener.tool_names}) — "
+            "per-vote results can no longer be assumed relay-clean without re-verifying "
+            "against a toolResult block, the way talentflow_agent's final text has to be"
+        )
+
+    case = CASES["1 - Golden (normal)"]
+    output = match_resume_to_jd(resume_text=case["resume"], job_description=case["jd"])
+    stripped = strip_to_verdict(output)
+    verdict_idx = output.find("VERDICT:")
+    tail_from_verdict = output[verdict_idx:] if verdict_idx != -1 else None
+    if stripped != tail_from_verdict:
+        failures.append(
+            "strip_to_verdict() altered content beyond truncating the preamble before the "
+            "first 'VERDICT:' — a vote's stored result no longer matches what the model "
+            "actually returned"
+        )
+
+    return failures
+
+
 if __name__ == "__main__":
     any_failed = False
     for name, case in CASES.items():
@@ -608,6 +657,19 @@ if __name__ == "__main__":
         any_failed = True
         print(f"FAIL ({len(relay_failures)} issue(s)):")
         for f in relay_failures:
+            print(f"  - {f}")
+    else:
+        print("PASS")
+    print()
+
+    print("=" * 80)
+    print("12 - Per-vote relay fidelity (voting layer)")
+    print("=" * 80)
+    per_vote_failures = test_per_vote_relay_fidelity()
+    if per_vote_failures:
+        any_failed = True
+        print(f"FAIL ({len(per_vote_failures)} issue(s)):")
+        for f in per_vote_failures:
             print(f"  - {f}")
     else:
         print("PASS")
