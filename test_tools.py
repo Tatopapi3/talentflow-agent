@@ -8,9 +8,12 @@ from agent import (
     aggregate_votes,
     extract_section,
     match_resume_to_jd,
+    parse_highlight_lines,
+    parse_requirement_lines,
     parse_result,
     parse_verdict,
     screen_resume_with_checkpoint,
+    talentflow_agent,
 )
 
 JOB_DESCRIPTION = """Senior Backend Engineer
@@ -436,6 +439,99 @@ def test_ambiguous_low_confidence_score_band() -> list[str]:
     return failures
 
 
+# Regression fixture for a real bug found via trace inspection (quick_trace.py):
+# talentflow_agent's own final text could silently diverge from what
+# match_resume_to_jd actually returned — a real run (this Sam Okafor resume
+# against a real Brain Co. job posting) had the tool return 10 MISSING
+# REQUIREMENTS (each tagged and annotated) plus 2 HIGHLIGHT MORE suggestions,
+# but the agent's own final text dropped 3 missing items, merged two others
+# into one, and dropped HIGHLIGHT MORE entirely. This resume/JD pair is used
+# here specifically because it's proven (via that same trace) to reliably
+# produce a long MISSING REQUIREMENTS list and a non-empty HIGHLIGHT MORE
+# section — a short/empty case wouldn't actually exercise the bug.
+_TRACE_TEST_RESUME = """Sam Okafor
+Backend Engineer, ShopFast (2019-2024)
+- Built distributed microservices for order fulfillment in production, written in Python
+- Designed and operated REST APIs for checkout and inventory
+- Used PostgreSQL for transactional data
+- 5 years of professional experience
+- Managed containerized deployments with Kubernetes
+"""
+
+_TRACE_TEST_JD = """About Brain Co.
+
+Brain Co. is an applied AI startup building AI applications for governments, healthcare systems, and critical industries.
+
+About The Role
+
+As an AI Product Engineer at Brain Co., you will design, develop, and deploy advanced software solutions that integrate AI, working directly with customers to develop the product spec and build from zero. From designing robust front-end interfaces to developing scalable back-end systems, you will turn research breakthroughs into practical solutions.
+
+You Will Thrive If You
+
+Minimum 2+ years of experience and an appetite for working directly with the customer to develop the software spec and build from zero
+Experience with front-end and back-end technologies, microservices, and cloud platforms
+Experience with modern web tooling such as React, Typescript, RESTful APIs, and database management systems
+Possess a strong foundation in software design principles, data structures, and algorithms
+Exhibit excellent problem-solving and analytical skills, with a proactive approach to challenges
+Enjoy working collaboratively with cross-functional teams
+Thrive in fast-paced environments where priorities or deadlines may compete.
+Eager to own problems end-to-end and willing to acquire any necessary knowledge to get the job done
+Hold a Bachelor's/Master's degree in Computer Science, Software Engineering, or a related field
+"""
+
+
+def test_talentflow_agent_relays_tool_result_verbatim() -> list[str]:
+    """Regression test: talentflow_agent's own final response must relay
+    match_resume_to_jd's result verbatim, not a paraphrase that drops or
+    merges items. Deliberately calls talentflow_agent directly (not
+    screen_resume(), which already bypasses this by extracting the tool
+    result from agent.messages) — this is defense-in-depth, checking the
+    prompt-level safeguard independently of the code-level one.
+
+    Extracts both the tool's raw result and the agent's own final text from
+    the SAME live call, not two separate calls — comparing two independent
+    live calls would conflate this test with ordinary temperature=1
+    non-determinism in what the model finds missing, which isn't what this
+    test is about."""
+    failures = []
+    prompt = f"Resume:\n{_TRACE_TEST_RESUME}\n\nJob Description:\n{_TRACE_TEST_JD}"
+    result = talentflow_agent(prompt)
+
+    tool_result_text = None
+    for message in talentflow_agent.messages:
+        for block in message.get("content", []):
+            if "toolResult" in block:
+                tool_result_text = "".join(c.get("text", "") for c in block["toolResult"]["content"])
+    final_text = str(result)
+
+    if tool_result_text is None:
+        failures.append("talentflow_agent did not call match_resume_to_jd — nothing to compare")
+        return failures
+
+    tool_missing = parse_requirement_lines(extract_section(tool_result_text, "MISSING REQUIREMENTS:"), "importance")
+    final_missing = parse_requirement_lines(extract_section(final_text, "MISSING REQUIREMENTS:"), "importance")
+    if len(final_missing) != len(tool_missing):
+        failures.append(
+            f"agent's final text has {len(final_missing)} MISSING REQUIREMENTS items, "
+            f"tool result had {len(tool_missing)} — final text dropped or merged items instead of relaying verbatim"
+        )
+
+    tool_highlights = parse_highlight_lines(extract_section(tool_result_text, "HIGHLIGHT MORE:"))
+    final_highlights = parse_highlight_lines(extract_section(final_text, "HIGHLIGHT MORE:"))
+    if tool_highlights and not final_highlights:
+        failures.append(
+            f"tool result had {len(tool_highlights)} HIGHLIGHT MORE item(s) but agent's final "
+            "text dropped the section entirely"
+        )
+    elif len(final_highlights) != len(tool_highlights):
+        failures.append(
+            f"agent's final text has {len(final_highlights)} HIGHLIGHT MORE items, "
+            f"tool result had {len(tool_highlights)}"
+        )
+
+    return failures
+
+
 if __name__ == "__main__":
     any_failed = False
     for name, case in CASES.items():
@@ -499,6 +595,19 @@ if __name__ == "__main__":
         any_failed = True
         print(f"FAIL ({len(score_band_failures)} issue(s)):")
         for f in score_band_failures:
+            print(f"  - {f}")
+    else:
+        print("PASS")
+    print()
+
+    print("=" * 80)
+    print("11 - talentflow_agent relays tool result verbatim")
+    print("=" * 80)
+    relay_failures = test_talentflow_agent_relays_tool_result_verbatim()
+    if relay_failures:
+        any_failed = True
+        print(f"FAIL ({len(relay_failures)} issue(s)):")
+        for f in relay_failures:
             print(f"  - {f}")
     else:
         print("PASS")
