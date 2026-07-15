@@ -10,6 +10,8 @@ Recruiters spend ~23 hours per hire manually screening 50–200+ resumes, and at
 
 `match_resume_to_jd(resume_text, job_description)` sends both texts to an LLM (via `LiteLLMModel`, currently Claude Sonnet 5 directly through the Anthropic API, run without a fixed temperature — see Known limitations for the model history) with a system prompt that:
 
+**Fallback**: `_get_model()` isn't Anthropic-only with no safety net. If `ANTHROPIC_API_KEY` isn't set, it skips straight to an OpenRouter/`gpt-4o` fallback without even attempting Anthropic. If the key is set, Anthropic is tried first; `_FallbackModel` wraps the actual model *call* (not just construction — a real distinction, since `strands.Agent` invokes `model.stream()` fresh on every turn, so this has to be call-time-aware to cover a long-lived Agent like `talentflow_agent` on every request, not just its first one) and transparently retries with OpenRouter/`gpt-4o` if the Anthropic call itself fails (bad key, network error, etc.). The fallback model is built lazily, only once actually needed — building it eagerly would require `OPENROUTER_API_KEY` even when Anthropic never fails, breaking the common case for anyone who's fully migrated off OpenRouter. Every actual model call prints which provider served it (`Using Anthropic (claude-sonnet-5)` or `Using OpenRouter fallback (gpt-4o): <reason>`). Verified live both ways: a normal run stays on Anthropic end-to-end; a run with an invalidated `ANTHROPIC_API_KEY` fell back cleanly with no crash (visible even in the trace — the tool-call ID format switches from Anthropic's `toolu_...` to OpenAI's `call_...`). Known gap, not fixed here: `_estimate_cost_usd` (used by the voting feature's cost logging) still prices against Anthropic's rate even on a fallback call, since it doesn't currently know which provider actually served a given request — a minor inaccuracy in `vote_log.txt` in the rare case a fallback fires, not a functional bug.
+
 - Requires citing the exact resume phrase behind every matched/missing requirement (no inferred skills)
 - Tags every requirement `(required)` or `(nice-to-have)` per the job description's own framing, and appends a brief relevance/importance clause to each
 - Surfaces up to 3 additional resume details that are relevant but under-emphasized (`HIGHLIGHT MORE`), with a concrete reframing suggestion — never inventing anything not already in the resume
@@ -38,7 +40,7 @@ Add your Anthropic API key to `.env`:
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-(`OPENROUTER_API_KEY` was used before the switch to Claude directly — see Known limitations — and is no longer read by any code path, but is harmless to leave in `.env` if present.)
+`OPENROUTER_API_KEY` is no longer the primary path (see Known limitations for the switch to Claude), but it's not dead either — `_get_model()` in `agent.py` falls back to it if `ANTHROPIC_API_KEY` is missing or an Anthropic call fails, so it's worth keeping set as a safety net.
 
 ## Usage
 

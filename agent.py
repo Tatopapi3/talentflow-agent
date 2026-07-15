@@ -115,9 +115,10 @@ Produce exactly one verdict per resume and stop. Do not re-evaluate or ask clari
 
 
 _MODEL_ID = "claude-sonnet-5"
+_OPENROUTER_FALLBACK_MODEL_ID = "openrouter/openai/gpt-4o"
 
 
-def _get_model() -> LiteLLMModel:
+def _get_anthropic_model() -> LiteLLMModel:
     # claude-sonnet-5 rejects temperature=0 outright (only temperature=1 is
     # supported) — every other model this project has used supported a
     # fixed low temperature for determinism; this one genuinely doesn't, so
@@ -136,6 +137,109 @@ def _get_model() -> LiteLLMModel:
         },
         model_id=_MODEL_ID,
         params={"max_tokens": 16384},
+    )
+
+
+def _get_openrouter_fallback_model() -> LiteLLMModel:
+    # Deliberately its own params, not the Anthropic ones carried over:
+    # gpt-4o doesn't reject temperature=0 (no need to omit it) and doesn't
+    # spend part of its output budget on internal reasoning the way
+    # claude-sonnet-5 does (no need for the larger max_tokens).
+    return LiteLLMModel(
+        client_args={
+            "api_base": "https://openrouter.ai/api/v1",
+            "api_key": os.environ["OPENROUTER_API_KEY"],
+        },
+        model_id=_OPENROUTER_FALLBACK_MODEL_ID,
+        params={"max_tokens": 4096, "temperature": 0},
+    )
+
+
+class _FallbackModel:
+    """Wraps a primary model with a fallback model at CALL time, not
+    construction time — strands.Agent invokes model.stream() fresh on every
+    turn, so deciding success/failure per-call (rather than once, at
+    _get_model() time) means even a long-lived Agent like talentflow_agent
+    (constructed once at import) still gets fallback behavior on every
+    actual request, not just its first one.
+
+    If the primary model's stream() raises before yielding anything (auth
+    failure, connection error, etc.), this transparently retries the same
+    request against the fallback instead of failing the whole screening.
+    The fallback model itself is built lazily (only once actually needed),
+    not eagerly alongside the primary — building it eagerly would require
+    OPENROUTER_API_KEY to be set even when Anthropic never fails, which
+    would break the common case for anyone who's fully migrated off
+    OpenRouter and removed that key.
+
+    Only stream() is call-time-fallback-aware; every other attribute
+    (format_request, get_config, etc.) delegates to the primary model via
+    __getattr__. strands doesn't require model objects to subclass its
+    Model ABC — Agent.__init__ only isinstance-checks for str, so a
+    duck-typed wrapper like this one works as a drop-in replacement.
+
+    Known gap: if the primary fails only after already yielding real
+    content (not the case for the auth/connection failures this actually
+    guards against, which fail immediately), retrying the fallback from
+    scratch could yield a mixed-provider transcript — not handled here,
+    since the realistic failure modes fail before any content streams."""
+
+    def __init__(self, primary, build_fallback, primary_label: str, fallback_label: str):
+        self._primary = primary
+        self._build_fallback = build_fallback
+        self._primary_label = primary_label
+        self._fallback_label = fallback_label
+
+    def __getattr__(self, name):
+        return getattr(self._primary, name)
+
+    async def stream(self, *args, **kwargs):
+        try:
+            gen = self._primary.stream(*args, **kwargs)
+            first_event = await gen.__anext__()
+        except StopAsyncIteration:
+            print(f"Using {self._primary_label}")
+            return
+        except Exception as e:
+            print(f"Using {self._fallback_label}: {e!r}")
+            try:
+                fallback = self._build_fallback()
+            except Exception as fallback_error:
+                raise RuntimeError(
+                    f"{self._primary_label} failed ({e!r}) and {self._fallback_label} could not be "
+                    f"constructed either ({fallback_error!r}) — no working model available"
+                ) from e
+            async for event in fallback.stream(*args, **kwargs):
+                yield event
+            return
+
+        print(f"Using {self._primary_label}")
+        yield first_event
+        async for event in gen:
+            yield event
+
+
+def _get_model():
+    """Anthropic (claude-sonnet-5) is the primary model. If
+    ANTHROPIC_API_KEY isn't set, this skips straight to the OpenRouter/
+    gpt-4o fallback without even attempting Anthropic. If the key is set,
+    Anthropic is tried first; if the actual model call fails (bad key,
+    network error, etc.), _FallbackModel transparently retries with
+    OpenRouter for that call. Every call site (_run_screening,
+    _run_screening_async, talentflow_agent) goes through this, so the
+    fallback applies everywhere a model is needed, not just one path."""
+    anthropic_label = f"Anthropic ({_MODEL_ID})"
+    openrouter_label = f"OpenRouter fallback ({_OPENROUTER_FALLBACK_MODEL_ID.split('/')[-1]})"
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print(f"Using {openrouter_label}: ANTHROPIC_API_KEY not set")
+        return _get_openrouter_fallback_model()
+
+    return _FallbackModel(
+        primary=_get_anthropic_model(),
+        build_fallback=_get_openrouter_fallback_model,
+        primary_label=anthropic_label,
+        fallback_label=openrouter_label,
     )
 
 
